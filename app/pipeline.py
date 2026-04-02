@@ -12,7 +12,7 @@ process_recording(wav_path) is the single entry point:
   8. Return the path to the written .md file
 
 Can be run standalone:
-    python -m app.pipeline ~/MeetingNotes/recordings/queue/some-recording.wav
+    python -m app.pipeline ~/Documents/MeetingNotes/recordings/queue/some-recording.wav
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ from .transcriber import transcribe, _build_initial_prompt
 
 logger = logging.getLogger(__name__)
 
-# --- Configuration -----------------------------------------------------------
+from .state import BASE_DIR
 
-BASE_DIR = os.path.expanduser("~/MeetingNotes")
+# --- Configuration -----------------------------------------------------------
 TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
 CONTEXT_PATH = os.path.join(BASE_DIR, "context.md")
 
@@ -89,7 +89,7 @@ def _load_sidecar(wav_path: str) -> dict:
 
 
 def _load_context_md() -> str:
-    """Read ~/MeetingNotes/context.md. Returns empty string on failure."""
+    """Read ~/Documents/MeetingNotes/context.md. Returns empty string on failure."""
     try:
         with open(CONTEXT_PATH, "r", encoding="utf-8") as f:
             return f.read()

@@ -2,7 +2,7 @@
 Formatter — builds the .md transcript file for MeetingNotes.
 
 Takes structured transcription and summary data and returns a markdown string
-suitable for writing to ~/MeetingNotes/transcripts/YYYY/MM/.
+suitable for writing to ~/Documents/MeetingNotes/transcripts/YYYY/MM/.
 """
 
 from __future__ import annotations

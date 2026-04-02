@@ -1,6 +1,6 @@
 """
 State management for MeetingNotes.
-Manages ~/MeetingNotes/state.json with atomic writes.
+Manages ~/Documents/MeetingNotes/state.json with atomic writes.
 
 state.json schema:
 {
@@ -21,7 +21,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = os.path.expanduser("~/MeetingNotes")
+BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/Documents/MeetingNotes"))
 STATE_PATH = os.path.join(BASE_DIR, "state.json")
 
 DEFAULT_STATE = {

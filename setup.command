@@ -3,12 +3,12 @@ set -euo pipefail
 
 # ============================================================
 # MeetingNotes — Automated Setup
-# Run: chmod +x setup.sh && ./setup.sh
+# Double-click this file in Finder, or run: ./setup.command
 # Safe to re-run — skips anything already installed.
 # ============================================================
 
 # -- Constants ------------------------------------------------
-BASE_DIR="$HOME/MeetingNotes"
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/Documents/MeetingNotes}"
 WHISPER_DIR="$HOME/whisper.cpp"
 WHISPER_BINARY="$WHISPER_DIR/build/bin/whisper-cli"
 WHISPER_MODEL="$WHISPER_DIR/models/ggml-large-v3-turbo.bin"
@@ -56,16 +56,54 @@ cleanup() {
     if [[ $exit_code -ne 0 ]]; then
         echo ""
         error "Setup failed at step $CURRENT_STEP."
-        info "Fix the issue above, then re-run ./setup.sh to resume."
+        info "Fix the issue above, then re-run setup.command to resume."
     fi
 }
 trap cleanup EXIT
 
 # ============================================================
+# WELCOME
+# ============================================================
+echo ""
+echo "${BOLD}════════════════════════════════════════${RESET}"
+echo "${BOLD}  MeetingNotes Setup${RESET}"
+echo "${BOLD}════════════════════════════════════════${RESET}"
+echo ""
+echo "  This script installs everything needed to run MeetingNotes,"
+echo "  a local meeting capture and transcription system."
+echo ""
+echo "  ${BOLD}What gets installed:${RESET}"
+echo ""
+echo "  ${BLUE}Dependencies${RESET}"
+echo "    Homebrew (macOS package manager)"
+echo "    Python 3.12, ffmpeg, cmake"
+echo ""
+echo "  ${BLUE}Transcription engine${RESET}"
+echo "    whisper.cpp — runs speech-to-text locally on your Mac"
+echo "    using GPU acceleration. Audio never leaves your machine."
+echo "    Includes a ~1.5GB language model download."
+echo ""
+echo "  ${BLUE}Summarization${RESET}"
+echo "    Claude API — sends transcript text (never audio) to"
+echo "    Claude for meeting summaries and action items."
+echo "    Requires an API key from Anthropic."
+echo ""
+echo "  ${BLUE}Apps${RESET}"
+echo "    Obsidian — for browsing and searching transcripts"
+echo ""
+echo "  Takes 10-20 minutes on a fresh machine."
+echo ""
+
+if ! confirm "Ready to start?"; then
+    echo "  No problem. Run this script again when you're ready."
+    exit 0
+fi
+
+# ============================================================
 # PRE-FLIGHT CHECKS
 # ============================================================
 echo ""
-echo "${BOLD}MeetingNotes Setup${RESET}"
+echo "${BOLD}Pre-flight checks${RESET}"
 echo "─────────────────────────────────"
 
 # macOS only
@@ -80,7 +118,7 @@ fi
 
 # Repo must be cloned
 if [[ ! -f "$BASE_DIR/app/menubar.py" ]]; then
-    fail "MeetingNotes repo not found at ~/MeetingNotes. Clone it first:\n  git clone <repo-url> ~/MeetingNotes"
+    fail "MeetingNotes not found at ~/Documents/MeetingNotes.\nClone it first:\n  git clone https://github.com/SF-Phenom/MeetingNotes.git ~/Documents/MeetingNotes"
 fi
 
 # Internet check
@@ -132,6 +170,11 @@ if command -v brew &>/dev/null; then
     already "Homebrew"
 else
     info "Installing Homebrew..."
+    echo ""
+    warn "macOS will ask for your login password (the one you use to unlock your Mac)."
+    warn "When you type, nothing will appear on screen — that's normal."
+    warn "Type your password and press Enter."
+    echo ""
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
     # Ensure brew is on PATH for this session
@@ -386,8 +429,8 @@ if [[ -d "$BASE_DIR/transcripts/.obsidian" ]]; then
     already "Obsidian vault at transcripts/"
 else
     mkdir -p "$BASE_DIR/transcripts/.obsidian"
-    success "Obsidian vault created at ~/MeetingNotes/transcripts/"
-    info "Open Obsidian → 'Open folder as vault' → select ~/MeetingNotes/transcripts"
+    success "Obsidian vault created at ~/Documents/MeetingNotes/transcripts/"
+    info "Open Obsidian → 'Open folder as vault' → select ~/Documents/MeetingNotes/transcripts"
 fi
 
 # ============================================================
@@ -408,9 +451,9 @@ else
 from app.calendar_lookup import _get_credentials
 creds = _get_credentials()
 print('SUCCESS' if creds else 'FAILED')
-" && success "Google Calendar authenticated" || warn "Authentication failed. You can retry later by re-running setup.sh."
+" && success "Google Calendar authenticated" || warn "Authentication failed. You can retry later by re-running setup.command."
     else
-        info "Skipped. Re-run setup.sh anytime to set this up."
+        info "Skipped. Re-run setup.command anytime to set this up."
     fi
 fi
 
@@ -467,14 +510,13 @@ echo "${BOLD}══════════════════════�
 echo ""
 echo "  ${BOLD}To launch:${RESET}"
 echo "    Double-click ${BLUE}MeetingNotes.command${RESET} in Finder"
-echo "    — or —"
-echo "    cd ~/MeetingNotes && source .venv/bin/activate && python app/menubar.py"
+echo "    (in ~/Documents/MeetingNotes/)"
 echo ""
 echo "  ${BOLD}To view transcripts:${RESET}"
-echo "    Open Obsidian → 'Open folder as vault' → ~/MeetingNotes/transcripts"
+echo "    Open Obsidian → 'Open folder as vault' → ~/Documents/MeetingNotes/transcripts"
 echo ""
 echo "  ${BOLD}First time?${RESET}"
-echo "    Edit ${BLUE}~/MeetingNotes/context.md${RESET} with your role, team, and meeting info."
+echo "    Edit ${BLUE}~/Documents/MeetingNotes/context.md${RESET} with your role, team, and meeting info."
 echo "    macOS will prompt for Microphone, Accessibility, and Notification"
 echo "    permissions on first use."
 echo ""

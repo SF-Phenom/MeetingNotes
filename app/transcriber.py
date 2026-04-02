@@ -18,9 +18,11 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration -----------------------------------------------------------
 
+from app.state import BASE_DIR
+
 WHISPER_BINARY = os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
 WHISPER_MODEL = os.path.expanduser("~/whisper.cpp/models/ggml-large-v3-turbo.bin")
-CONTEXT_PATH = os.path.expanduser("~/MeetingNotes/context.md")
+CONTEXT_PATH = os.path.join(BASE_DIR, "context.md")
 
 
 # --- Data types --------------------------------------------------------------

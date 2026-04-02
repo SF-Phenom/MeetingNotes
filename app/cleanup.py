@@ -16,10 +16,9 @@ import os
 from datetime import date, datetime, timedelta
 
 from . import state as state_mod
+from .state import BASE_DIR
 
 logger = logging.getLogger(__name__)
-
-BASE_DIR = os.path.expanduser("~/MeetingNotes")
 QUEUE_DIR = os.path.join(BASE_DIR, "recordings", "queue")
 
 

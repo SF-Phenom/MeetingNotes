@@ -15,10 +15,13 @@ __pycache__/
 .venv/
 
 # Logs
-logs/*.log
+logs/
 
 # macOS
 .DS_Store
+
+# Obsidian (per-user vault config)
+.obsidian/
 
 # Credentials (per-user OAuth tokens, API keys)
 .credentials/google_token.json
@@ -32,4 +35,3 @@ dist/
 state.json
 transcripts/
 projects/
-logs/

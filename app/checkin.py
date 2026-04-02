@@ -14,10 +14,9 @@ import subprocess
 from datetime import date, datetime
 
 from app import state
+from app.state import BASE_DIR
 
 logger = logging.getLogger(__name__)
-
-BASE_DIR = os.path.expanduser("~/MeetingNotes")
 TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
 PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
 CONTEXT_PATH = os.path.join(BASE_DIR, "context.md")
@@ -154,7 +153,7 @@ def mark_checkin_complete() -> None:
 
 
 def _rel(path: str) -> str:
-    """Return path relative to BASE_DIR (~/MeetingNotes/)."""
+    """Return path relative to BASE_DIR (~/Documents/MeetingNotes/)."""
     try:
         return os.path.relpath(path, BASE_DIR)
     except ValueError:

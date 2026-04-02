@@ -16,9 +16,9 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-logger = logging.getLogger(__name__)
+from app.state import BASE_DIR
 
-BASE_DIR = os.path.expanduser("~/MeetingNotes")
+logger = logging.getLogger(__name__)
 CREDENTIALS_DIR = os.path.join(BASE_DIR, ".credentials")
 CLIENT_SECRET_PATH = os.path.join(CREDENTIALS_DIR, "google_oauth_client.json")
 TOKEN_PATH = os.path.join(CREDENTIALS_DIR, "google_token.json")
