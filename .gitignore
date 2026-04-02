@@ -1,0 +1,35 @@
+# Build artifacts
+.bin/
+CaptureAudio/.build/
+CaptureAudio/.swiftpm/
+
+# Recordings (large binary files, ephemeral)
+recordings/active/*.wav
+recordings/active/.lock
+recordings/queue/*.wav
+recordings/queue/*.meta.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Logs
+logs/*.log
+
+# macOS
+.DS_Store
+
+# Credentials (per-user OAuth tokens, API keys)
+.credentials/google_token.json
+.credentials/*.pickle
+.env
+
+# Distribution
+dist/
+
+# User data (generated at runtime)
+state.json
+transcripts/
+projects/
+logs/
