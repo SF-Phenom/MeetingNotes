@@ -3,7 +3,7 @@ MeetingNotes menubar application.
 
 Run with:
     python app/menubar.py
-from ~/Documents/MeetingNotes/
+from ~/MeetingNotes/
 
 Requires: rumps, psutil, anthropic
 """
@@ -20,7 +20,7 @@ import time
 import rumps
 
 # Make sure the package can be imported when run directly
-_BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/Documents/MeetingNotes"))
+_BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes"))
 if _BASE_DIR not in sys.path:
     sys.path.insert(0, _BASE_DIR)
 

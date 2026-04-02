@@ -7,7 +7,7 @@
 Double-click `setup.command` in Finder, or run it from Terminal:
 
 ```bash
-cd ~/Documents/MeetingNotes
+cd ~/MeetingNotes
 ./setup.command
 ```
 
@@ -75,7 +75,7 @@ Should print `Python 3.12.x`.
 Create an isolated environment so packages don't conflict with your system:
 
 ```bash
-cd ~/Documents/MeetingNotes
+cd ~/MeetingNotes
 python3.12 -m venv .venv
 source .venv/bin/activate
 ```
@@ -89,7 +89,7 @@ pip install -r requirements.txt
 **Every time you open a new terminal** to work with MeetingNotes, activate the environment first:
 
 ```bash
-source ~/Documents/MeetingNotes/.venv/bin/activate
+source ~/MeetingNotes/.venv/bin/activate
 ```
 
 ---
@@ -172,7 +172,7 @@ This auto-populates meeting name and participants from your Google Calendar. If 
 **Install the Google libraries** (if not already installed):
 
 ```bash
-cd ~/Documents/MeetingNotes
+cd ~/MeetingNotes
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -180,14 +180,14 @@ pip install -r requirements.txt
 **Place the credential file:**
 
 ```bash
-mkdir -p ~/Documents/MeetingNotes/.credentials
-cp /path/to/your/client_secret_XXXXX.json ~/Documents/MeetingNotes/.credentials/google_oauth_client.json
+mkdir -p ~/MeetingNotes/.credentials
+cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes/.credentials/google_oauth_client.json
 ```
 
 **Authenticate** (one-time — opens a browser window):
 
 ```bash
-cd ~/Documents/MeetingNotes
+cd ~/MeetingNotes
 source .venv/bin/activate
 python3 -c "
 from app.calendar_lookup import _get_credentials
@@ -213,10 +213,10 @@ brew install --cask obsidian
 Create the vault (a `.obsidian` folder marks the directory as a vault):
 
 ```bash
-mkdir -p ~/Documents/MeetingNotes/transcripts/.obsidian
+mkdir -p ~/MeetingNotes/transcripts/.obsidian
 ```
 
-Then open Obsidian → **Open folder as vault** → select `~/Documents/MeetingNotes/transcripts`.
+Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes/transcripts`.
 
 All your `.md` transcripts will appear in the sidebar, searchable and linked.
 
@@ -225,14 +225,14 @@ All your `.md` transcripts will appear in the sidebar, searchable and linked.
 ## 9. Build the Swift Audio Capture Binary
 
 ```bash
-cd ~/Documents/MeetingNotes/CaptureAudio
+cd ~/MeetingNotes/CaptureAudio
 swift build -c release
 ```
 
 The binary will be at `.build/release/CaptureAudio`. To install it:
 
 ```bash
-cp .build/release/CaptureAudio ~/Documents/MeetingNotes/.bin/capture-audio
+cp .build/release/CaptureAudio ~/MeetingNotes/.bin/capture-audio
 ```
 
 ---
@@ -256,7 +256,7 @@ The audio capture binary requests microphone access. The Python menubar app requ
 ## 11. Run the App
 
 ```bash
-cd ~/Documents/MeetingNotes
+cd ~/MeetingNotes
 source .venv/bin/activate
 python app/menubar.py
 ```
@@ -268,13 +268,13 @@ You should see a microphone icon (🎙) in your menu bar.
 ## 12. First-Run Checklist
 
 - [ ] Menu bar icon appears
-- [ ] Edit `~/Documents/MeetingNotes/context.md` with your role, team, and meeting info
+- [ ] Edit `~/MeetingNotes/context.md` with your role, team, and meeting info
 - [ ] Open a Google Meet in Chrome to test call detection
 - [ ] Try a manual recording start/stop from the menu bar
-- [ ] Check `~/Documents/MeetingNotes/recordings/queue/` for the recorded `.wav` file
+- [ ] Check `~/MeetingNotes/recordings/queue/` for the recorded `.wav` file
 - [ ] After recording stops, transcription should auto-start (⏳ icon in menubar)
-- [ ] Check `~/Documents/MeetingNotes/transcripts/` for the generated `.md` file
-- [ ] Or transcribe manually: `python -m app.pipeline ~/Documents/MeetingNotes/recordings/queue/<filename>.wav`
+- [ ] Check `~/MeetingNotes/transcripts/` for the generated `.md` file
+- [ ] Or transcribe manually: `python -m app.pipeline ~/MeetingNotes/recordings/queue/<filename>.wav`
 
 ---
 
@@ -294,7 +294,7 @@ You should see a microphone icon (🎙) in your menu bar.
 
 **Claude summarization fails:** Check that `ANTHROPIC_API_KEY` is set in your environment. The key must be exported before launching the app. If you added it to `~/.zshrc`, restart your terminal or run `source ~/.zshrc`.
 
-**Transcription runs but summary says "unavailable":** This means whisper succeeded but Claude API failed. Check `~/Documents/MeetingNotes/logs/app.log` for the specific error. The transcript is still saved with the raw text.
+**Transcription runs but summary says "unavailable":** This means whisper succeeded but Claude API failed. Check `~/MeetingNotes/logs/app.log` for the specific error. The transcript is still saved with the raw text.
 
 **setup.command failed partway through:** Re-run `./setup.command` — it skips completed steps and resumes where it left off.
 

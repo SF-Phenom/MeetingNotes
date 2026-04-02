@@ -8,7 +8,7 @@ set -euo pipefail
 # ============================================================
 
 # -- Constants ------------------------------------------------
-BASE_DIR="${MEETINGNOTES_HOME:-$HOME/Documents/MeetingNotes}"
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
 WHISPER_DIR="$HOME/whisper.cpp"
 WHISPER_BINARY="$WHISPER_DIR/build/bin/whisper-cli"
 WHISPER_MODEL="$WHISPER_DIR/models/ggml-large-v3-turbo.bin"
@@ -118,7 +118,7 @@ fi
 
 # Repo must be cloned
 if [[ ! -f "$BASE_DIR/app/menubar.py" ]]; then
-    fail "MeetingNotes not found at ~/Documents/MeetingNotes.\nClone it first:\n  git clone https://github.com/SF-Phenom/MeetingNotes.git ~/Documents/MeetingNotes"
+    fail "MeetingNotes not found at ~/MeetingNotes.\nClone it first:\n  git clone https://github.com/SF-Phenom/MeetingNotes.git ~/MeetingNotes"
 fi
 
 # Internet check
@@ -315,15 +315,18 @@ if [[ -x "$CAPTURE_BINARY" ]]; then
     already "capture-audio binary"
 else
     info "Building CaptureAudio (Swift)..."
+    # Build in /tmp to avoid cloud sync (Google Drive/iCloud) locking build files
+    build_tmp=$(mktemp -d)
     cd "$BASE_DIR/CaptureAudio"
-    swift build -c release 2>&1 | tail -5
+    swift build -c release --scratch-path "$build_tmp" 2>&1 | tail -5 || true
 
-    if [[ ! -f ".build/release/CaptureAudio" ]]; then
+    if [[ ! -f "$build_tmp/release/CaptureAudio" ]]; then
         fail "Swift build failed. Ensure macOS 14.2+ and Xcode CLI tools are installed."
     fi
 
     mkdir -p "$BASE_DIR/.bin"
-    cp .build/release/CaptureAudio "$CAPTURE_BINARY"
+    cp "$build_tmp/release/CaptureAudio" "$CAPTURE_BINARY"
+    rm -rf "$build_tmp"
     cd "$BASE_DIR"
     success "capture-audio built and installed"
 fi
@@ -429,8 +432,8 @@ if [[ -d "$BASE_DIR/transcripts/.obsidian" ]]; then
     already "Obsidian vault at transcripts/"
 else
     mkdir -p "$BASE_DIR/transcripts/.obsidian"
-    success "Obsidian vault created at ~/Documents/MeetingNotes/transcripts/"
-    info "Open Obsidian → 'Open folder as vault' → select ~/Documents/MeetingNotes/transcripts"
+    success "Obsidian vault created at ~/MeetingNotes/transcripts/"
+    info "Open Obsidian → 'Open folder as vault' → select ~/MeetingNotes/transcripts"
 fi
 
 # ============================================================
@@ -510,13 +513,13 @@ echo "${BOLD}══════════════════════�
 echo ""
 echo "  ${BOLD}To launch:${RESET}"
 echo "    Double-click ${BLUE}MeetingNotes.command${RESET} in Finder"
-echo "    (in ~/Documents/MeetingNotes/)"
+echo "    (in ~/MeetingNotes/)"
 echo ""
 echo "  ${BOLD}To view transcripts:${RESET}"
-echo "    Open Obsidian → 'Open folder as vault' → ~/Documents/MeetingNotes/transcripts"
+echo "    Open Obsidian → 'Open folder as vault' → ~/MeetingNotes/transcripts"
 echo ""
 echo "  ${BOLD}First time?${RESET}"
-echo "    Edit ${BLUE}~/Documents/MeetingNotes/context.md${RESET} with your role, team, and meeting info."
+echo "    Edit ${BLUE}~/MeetingNotes/context.md${RESET} with your role, team, and meeting info."
 echo "    macOS will prompt for Microphone, Accessibility, and Notification"
 echo "    permissions on first use."
 echo ""

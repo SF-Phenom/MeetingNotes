@@ -153,7 +153,7 @@ def mark_checkin_complete() -> None:
 
 
 def _rel(path: str) -> str:
-    """Return path relative to BASE_DIR (~/Documents/MeetingNotes/)."""
+    """Return path relative to BASE_DIR (~/MeetingNotes/)."""
     try:
         return os.path.relpath(path, BASE_DIR)
     except ValueError:

@@ -19,6 +19,7 @@ logs/
 
 # macOS
 .DS_Store
+Icon?
 
 # Obsidian (per-user vault config)
 .obsidian/

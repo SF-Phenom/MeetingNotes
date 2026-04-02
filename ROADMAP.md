@@ -14,7 +14,7 @@ Future enhancements, roughly prioritized. Check items off as they're completed.
   - **Google Tasks** — Already have OAuth wired up, just add Tasks API scope
   - **Notion** — REST API, requires integration token setup
 
-- [ ] **Standalone setup.command installer (Phase 2)** — Make `setup.command` fully standalone: a single file the user downloads from GitHub. It installs initial dependencies (Xcode CLI tools, Homebrew, git), then clones the repo from GitHub to `~/Documents/MeetingNotes`, then continues with the rest of the setup (whisper.cpp, Python venv, Swift build, API key, calendar). Coworkers never need to think about git or where to put files — just download one file and double-click.
+- [ ] **Standalone setup.command installer (Phase 2)** — Make `setup.command` fully standalone: a single file the user downloads from GitHub. It installs initial dependencies (Xcode CLI tools, Homebrew, git), then clones the repo from GitHub to `~/MeetingNotes`, then continues with the rest of the setup (whisper.cpp, Python venv, Swift build, API key, calendar). Coworkers never need to think about git or where to put files — just download one file and double-click.
 
 ## Investigate
 
