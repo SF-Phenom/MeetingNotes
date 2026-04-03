@@ -18,7 +18,7 @@ VENV_DIR="$ENGINE_DIR/.venv"
 REPO_URL="https://github.com/SF-Phenom/MeetingNotes.git"
 SCRIPT_VERSION="2"
 CURRENT_STEP=0
-TOTAL_STEPS=12
+TOTAL_STEPS=13
 
 # -- Colors ---------------------------------------------------
 RED='\033[0;31m'
@@ -437,28 +437,33 @@ fi
 if $api_key_set; then
     already "ANTHROPIC_API_KEY (${ANTHROPIC_API_KEY:0:12}...)"
 else
-    info "You need an API key from https://console.anthropic.com/"
-    info "Transcript text (never audio) is sent to Claude for summarization."
+    info "An API key from https://console.anthropic.com/ enables"
+    info "higher-quality Claude summaries. Without one, summaries"
+    info "use the local Qwen model (which still works well)."
     echo ""
 
-    attempts=0
-    while [[ $attempts -lt 3 ]]; do
-        echo -n "  Paste your ANTHROPIC_API_KEY: "
-        read -r api_key
-        if [[ "$api_key" == sk-ant-* ]]; then
-            echo "export ANTHROPIC_API_KEY=\"$api_key\"" >> "$HOME/.zshrc"
-            export ANTHROPIC_API_KEY="$api_key"
-            success "API key saved to ~/.zshrc"
-            break
-        else
-            warn "Key should start with 'sk-ant-'. Try again."
-            attempts=$((attempts + 1))
-        fi
-    done
+    if confirm "Do you have an Anthropic API key?"; then
+        attempts=0
+        while [[ $attempts -lt 3 ]]; do
+            echo -n "  Paste your ANTHROPIC_API_KEY: "
+            read -r api_key
+            if [[ "$api_key" == sk-ant-* ]]; then
+                echo "export ANTHROPIC_API_KEY=\"$api_key\"" >> "$HOME/.zshrc"
+                export ANTHROPIC_API_KEY="$api_key"
+                success "API key saved to ~/.zshrc"
+                break
+            else
+                warn "Key should start with 'sk-ant-'. Try again (or press Ctrl+C to skip)."
+                attempts=$((attempts + 1))
+            fi
+        done
 
-    if [[ $attempts -ge 3 ]]; then
-        warn "Skipping API key setup. Add it later:"
-        warn "  echo 'export ANTHROPIC_API_KEY=sk-ant-...' >> ~/.zshrc"
+        if [[ $attempts -ge 3 ]]; then
+            warn "Skipping API key. You can add one later from the MeetingNotes menu bar."
+        fi
+    else
+        info "No problem. Summaries will use the local Qwen model."
+        info "You can add an API key later from the MeetingNotes menu bar."
     fi
 fi
 
@@ -485,9 +490,48 @@ else
 fi
 
 # ============================================================
-# STEP 11: Google Calendar (Optional)
+# STEP 11: Ollama (local AI for summaries)
 # ============================================================
-step 12 "Google Calendar integration (optional)"
+step 12 "Ollama (local AI for summaries)"
+
+if command -v ollama &>/dev/null || [[ -d "/Applications/Ollama.app" ]]; then
+    already "Ollama"
+else
+    info "Installing Ollama (runs AI models locally on your Mac)..."
+    brew install --cask ollama
+    success "Ollama installed"
+fi
+
+# Ensure Ollama is running (needed to pull models)
+if ! curl -s --max-time 3 -o /dev/null http://localhost:11434/api/tags 2>/dev/null; then
+    info "Starting Ollama..."
+    open -a Ollama 2>/dev/null || ollama serve &>/dev/null &
+    # Wait for it to be ready
+    elapsed=0
+    while ! curl -s --max-time 2 -o /dev/null http://localhost:11434/api/tags 2>/dev/null; do
+        if [[ $elapsed -ge 30 ]]; then
+            warn "Ollama did not start in time. You may need to open Ollama manually and re-run."
+            break
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+fi
+
+# Pull Qwen model
+if ollama list 2>/dev/null | grep -q "qwen3:4b"; then
+    already "Qwen model (qwen3:4b)"
+else
+    info "Downloading Qwen model (qwen3:4b, ~2.5GB)..."
+    info "This powers local meeting summaries when Claude is not available."
+    ollama pull qwen3:4b
+    success "Qwen model downloaded"
+fi
+
+# ============================================================
+# STEP 12: Google Calendar (Optional)
+# ============================================================
+step 13 "Google Calendar integration (optional)"
 
 if [[ -f "$ENGINE_DIR/.credentials/google_token.json" ]]; then
     already "Google Calendar authenticated"
@@ -540,7 +584,8 @@ check "Python packages"         "$VENV_DIR/bin/python -c 'import rumps, psutil, 
 check "whisper-cli"             "test -x $WHISPER_BINARY"
 check "whisper model"           "test -f $WHISPER_MODEL"
 check "capture-audio"           "test -x $CAPTURE_BINARY"
-check "ANTHROPIC_API_KEY"       "test -n \"\${ANTHROPIC_API_KEY:-}\""
+check "Ollama"                  "command -v ollama"
+check "Qwen model"             "ollama list 2>/dev/null | grep -q qwen3:4b"
 check "Obsidian"                "test -d /Applications/Obsidian.app"
 check "Obsidian vault"          "test -d $BASE_DIR/transcripts/.obsidian"
 check "Directory structure"     "test -d $ENGINE_DIR/recordings/queue"

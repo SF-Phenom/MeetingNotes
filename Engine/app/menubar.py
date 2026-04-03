@@ -135,10 +135,18 @@ class MeetingNotesApp(rumps.App):
         items.append(self._build_model_submenu())
         items.append(None)
 
+        # API key status
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            items.append(rumps.MenuItem("API Key \u2713"))
+        else:
+            items.append(
+                rumps.MenuItem("Add API Key", callback=self._add_api_key)
+            )
+
         items.extend([
-            rumps.MenuItem("Recordings ({} pending)".format(pending_count)),
-            None,
             rumps.MenuItem("Check for Updates", callback=self._check_for_updates),
+            None,
+            rumps.MenuItem("Recordings ({} pending)".format(pending_count)),
             None,
             rumps.MenuItem("Quit", callback=self._quit),
         ])
@@ -556,6 +564,59 @@ class MeetingNotesApp(rumps.App):
                 count, "s" if count != 1 else ""
             ),
         )
+
+    # ── API Key ────────────────────────────────────────────────────────────────
+
+    def _add_api_key(self, _sender) -> None:
+        """Prompt the user to enter an Anthropic API key via a dialog."""
+        window = rumps.Window(
+            message="Paste your Anthropic API key (starts with sk-ant-):",
+            title="Add API Key",
+            default_text="",
+            ok="Save",
+            cancel="Cancel",
+            dimensions=(320, 24),
+        )
+        response = window.run()
+
+        if not response.clicked:
+            return  # user cancelled
+
+        api_key = response.text.strip()
+        if not api_key:
+            return
+
+        if not api_key.startswith("sk-ant-"):
+            rumps.alert(
+                title="Invalid API Key",
+                message="The key should start with 'sk-ant-'. Please try again.",
+            )
+            return
+
+        # Save to environment for immediate use
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+
+        # Persist to ~/.zshrc
+        try:
+            zshrc_path = os.path.expanduser("~/.zshrc")
+            # Remove any existing ANTHROPIC_API_KEY line
+            lines = []
+            if os.path.exists(zshrc_path):
+                with open(zshrc_path, "r") as f:
+                    lines = [l for l in f.readlines() if "ANTHROPIC_API_KEY" not in l]
+            lines.append('export ANTHROPIC_API_KEY="{}"\n'.format(api_key))
+            with open(zshrc_path, "w") as f:
+                f.writelines(lines)
+            logger.info("API key saved to ~/.zshrc")
+        except OSError as e:
+            logger.error("Failed to save API key to ~/.zshrc: %s", e)
+
+        rumps.notification(
+            title="MeetingNotes",
+            subtitle="API key saved",
+            message="Claude summarization is now active.",
+        )
+        self._build_idle_menu()
 
     # ── Utilities ──────────────────────────────────────────────────────────────
 
