@@ -36,7 +36,7 @@ from .state import BASE_DIR
 
 # --- Configuration -----------------------------------------------------------
 TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
-CONTEXT_PATH = os.path.join(BASE_DIR, "context.md")
+CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
 
 
 # --- Helpers -----------------------------------------------------------------

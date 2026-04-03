@@ -19,7 +19,7 @@ from . import state as state_mod
 from .state import BASE_DIR
 
 logger = logging.getLogger(__name__)
-QUEUE_DIR = os.path.join(BASE_DIR, "recordings", "queue")
+QUEUE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "queue")
 
 
 # ---------------------------------------------------------------------------

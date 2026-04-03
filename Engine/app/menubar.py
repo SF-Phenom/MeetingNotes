@@ -2,7 +2,7 @@
 MeetingNotes menubar application.
 
 Run with:
-    python app/menubar.py
+    python Engine/app/menubar.py
 from ~/MeetingNotes/
 
 Requires: rumps, psutil, anthropic
@@ -21,8 +21,9 @@ import rumps
 
 # Make sure the package can be imported when run directly
 _BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes"))
-if _BASE_DIR not in sys.path:
-    sys.path.insert(0, _BASE_DIR)
+_ENGINE_DIR = os.path.join(_BASE_DIR, "Engine")
+if _ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _ENGINE_DIR)
 
 from app import state as state_mod
 from app import recorder
@@ -34,7 +35,7 @@ from app import summarizer
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 
-_LOG_DIR = os.path.join(_BASE_DIR, "logs")
+_LOG_DIR = os.path.join(_BASE_DIR, "Engine", "logs")
 os.makedirs(_LOG_DIR, exist_ok=True)
 _LOG_PATH = os.path.join(_LOG_DIR, "app.log")
 
@@ -56,7 +57,7 @@ ICON_PENDING = "📝"
 ICON_TRANSCRIBING = "⏳"
 ICON_CHECKIN = "🔔"
 
-_QUEUE_DIR = os.path.join(_BASE_DIR, "recordings", "queue")
+_QUEUE_DIR = os.path.join(_BASE_DIR, "Engine", "recordings", "queue")
 
 # ─── MeetingNotes App ─────────────────────────────────────────────────────────
 
@@ -136,6 +137,8 @@ class MeetingNotesApp(rumps.App):
 
         items.extend([
             rumps.MenuItem("Recordings ({} pending)".format(pending_count)),
+            None,
+            rumps.MenuItem("Check for Updates", callback=self._check_for_updates),
             None,
             rumps.MenuItem("Quit", callback=self._quit),
         ])
@@ -556,12 +559,99 @@ class MeetingNotesApp(rumps.App):
 
     # ── Utilities ──────────────────────────────────────────────────────────────
 
+    def _check_for_updates(self, _sender) -> None:
+        """Check GitHub for updates and offer to install them."""
+        threading.Thread(
+            target=self._run_update_check, daemon=True
+        ).start()
+
+    def _run_update_check(self) -> None:
+        """Background thread: fetch from origin and compare."""
+        import subprocess as sp
+
+        try:
+            sp.run(
+                ["git", "-C", _BASE_DIR, "fetch"],
+                capture_output=True, timeout=30,
+            )
+            local = sp.run(
+                ["git", "-C", _BASE_DIR, "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            remote = sp.run(
+                ["git", "-C", _BASE_DIR, "rev-parse", "origin/main"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except Exception as e:
+            logger.error("Update check failed: %s", e)
+            rumps.notification(
+                title="MeetingNotes",
+                subtitle="Update check failed",
+                message="Could not reach GitHub. Check your internet connection.",
+            )
+            return
+
+        if local == remote:
+            rumps.notification(
+                title="MeetingNotes",
+                subtitle="Up to date",
+                message="You're running the latest version.",
+            )
+            return
+
+        response = rumps.alert(
+            title="Update Available",
+            message=(
+                "A new version of MeetingNotes is available.\n\n"
+                "Install now? The app will restart automatically."
+            ),
+            ok="Install",
+            cancel="Later",
+        )
+        if response == 1:  # "Install" clicked
+            self._apply_update()
+
+    def _apply_update(self) -> None:
+        """Pull latest changes and restart the app."""
+        import subprocess as sp
+
+        try:
+            result = sp.run(
+                ["git", "-C", _BASE_DIR, "pull", "--ff-only"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                logger.error("git pull failed: %s", result.stderr)
+                rumps.alert(
+                    title="Update Failed",
+                    message="Could not pull updates. Check Engine/logs/app.log for details.",
+                )
+                return
+        except Exception as e:
+            logger.error("Update pull failed: %s", e)
+            rumps.alert(title="Update Failed", message=str(e))
+            return
+
+        logger.info("Update applied, restarting app")
+        rumps.notification(
+            title="MeetingNotes",
+            subtitle="Update installed",
+            message="Restarting...",
+        )
+
+        # Restart: launch a new instance then quit this one
+        import sys
+        sp.Popen(
+            [sys.executable, os.path.join(_ENGINE_DIR, "app", "menubar.py")],
+            start_new_session=True,
+        )
+        rumps.quit_application()
+
     @staticmethod
     def _count_queued_recordings() -> int:
         """Return the number of .wav files waiting in recordings/queue/."""
-        queue_dir = os.path.join(_BASE_DIR, "recordings", "queue")
         try:
-            return sum(1 for f in os.listdir(queue_dir) if f.endswith(".wav"))
+            return sum(1 for f in os.listdir(_QUEUE_DIR) if f.endswith(".wav"))
         except OSError:
             return 0
 

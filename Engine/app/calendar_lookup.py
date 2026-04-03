@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from app.state import BASE_DIR
 
 logger = logging.getLogger(__name__)
-CREDENTIALS_DIR = os.path.join(BASE_DIR, ".credentials")
+CREDENTIALS_DIR = os.path.join(BASE_DIR, "Engine", ".credentials")
 CLIENT_SECRET_PATH = os.path.join(CREDENTIALS_DIR, "google_oauth_client.json")
 TOKEN_PATH = os.path.join(CREDENTIALS_DIR, "google_token.json")
 

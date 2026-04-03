@@ -36,12 +36,12 @@ echo "${BOLD}══════════════════════�
 echo ""
 echo "  This will remove MeetingNotes and its dependencies."
 echo ""
-echo "  ${GREEN}Kept:${RESET}  transcripts/, projects/ (your meeting data)"
+echo "  ${GREEN}Kept:${RESET}  transcripts/, projects/, Settings/ (your data)"
 echo "  ${GREEN}Kept:${RESET}  Obsidian vault config (.obsidian/)"
 echo "  ${GREEN}Kept:${RESET}  Homebrew, Python, ffmpeg, cmake, Obsidian"
 echo ""
-echo "  ${RED}Removed:${RESET}  App code, whisper.cpp (~2.5GB), Python venv,"
-echo "            Swift binary, logs, recordings, credentials"
+echo "  ${RED}Removed:${RESET}  Engine/ (app code, whisper.cpp ~2.5GB, Python venv,"
+echo "            Swift binary, logs, recordings, credentials)"
 echo "  ${RED}Removed:${RESET}  ANTHROPIC_API_KEY from ~/.zshrc"
 echo ""
 
@@ -71,6 +71,14 @@ if [[ -d "$BASE_DIR/projects" ]] && [[ -n "$(ls -A "$BASE_DIR/projects" 2>/dev/n
     mv "$BASE_DIR/projects" "$HOME/MeetingNotes-data/projects"
     KEPT_DATA=true
     success "Projects preserved"
+fi
+
+if [[ -d "$BASE_DIR/Settings" ]]; then
+    info "Moving Settings to ~/MeetingNotes-data/Settings..."
+    mkdir -p "$HOME/MeetingNotes-data"
+    mv "$BASE_DIR/Settings" "$HOME/MeetingNotes-data/Settings"
+    KEPT_DATA=true
+    success "Settings preserved"
 fi
 
 # ============================================================

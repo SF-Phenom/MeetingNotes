@@ -22,7 +22,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes"))
-STATE_PATH = os.path.join(BASE_DIR, "state.json")
+STATE_PATH = os.path.join(BASE_DIR, "Engine", "state.json")
 
 DEFAULT_STATE = {
     "transcripts_since_checkin": 0,

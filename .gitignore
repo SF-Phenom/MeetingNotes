@@ -1,21 +1,21 @@
 # Build artifacts
-.bin/
-CaptureAudio/.build/
-CaptureAudio/.swiftpm/
+Engine/.bin/
+Engine/CaptureAudio/.build/
+Engine/CaptureAudio/.swiftpm/
 
 # Recordings (large binary files, ephemeral)
-recordings/active/*.wav
-recordings/active/.lock
-recordings/queue/*.wav
-recordings/queue/*.meta.json
+Engine/recordings/active/*.wav
+Engine/recordings/active/.lock
+Engine/recordings/queue/*.wav
+Engine/recordings/queue/*.meta.json
 
 # Python
 __pycache__/
 *.pyc
-.venv/
+Engine/.venv/
 
 # Logs
-logs/
+Engine/logs/
 
 # macOS
 .DS_Store
@@ -25,14 +25,22 @@ Icon?
 .obsidian/
 
 # Credentials (per-user OAuth tokens, API keys)
-.credentials/google_token.json
-.credentials/*.pickle
+Engine/.credentials/google_token.json
+Engine/.credentials/*.pickle
 .env
+
+# Legacy root-level artifacts (from pre-restructure installs)
+/.bin/
+/.venv/
+/.credentials/
+/logs/
+/recordings/
+/state.json
 
 # Distribution
 dist/
 
 # User data (generated at runtime)
-state.json
+Engine/state.json
 transcripts/
 projects/

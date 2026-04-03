@@ -21,10 +21,10 @@ from . import state as state_mod
 from .state import BASE_DIR
 
 logger = logging.getLogger(__name__)
-BINARY = os.path.join(BASE_DIR, ".bin", "capture-audio")
-ACTIVE_DIR = os.path.join(BASE_DIR, "recordings", "active")
-QUEUE_DIR = os.path.join(BASE_DIR, "recordings", "queue")
-LOCK_FILE = os.path.join(BASE_DIR, "recordings", "active", ".lock")
+BINARY = os.path.join(BASE_DIR, "Engine", ".bin", "capture-audio")
+ACTIVE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "active")
+QUEUE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "queue")
+LOCK_FILE = os.path.join(BASE_DIR, "Engine", "recordings", "active", ".lock")
 
 _process: subprocess.Popen | None = None
 

@@ -12,10 +12,13 @@ BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
 WHISPER_DIR="$HOME/whisper.cpp"
 WHISPER_BINARY="$WHISPER_DIR/build/bin/whisper-cli"
 WHISPER_MODEL="$WHISPER_DIR/models/ggml-large-v3-turbo.bin"
-CAPTURE_BINARY="$BASE_DIR/.bin/capture-audio"
-VENV_DIR="$BASE_DIR/.venv"
+ENGINE_DIR="$BASE_DIR/Engine"
+CAPTURE_BINARY="$ENGINE_DIR/.bin/capture-audio"
+VENV_DIR="$ENGINE_DIR/.venv"
+REPO_URL="https://github.com/SF-Phenom/MeetingNotes.git"
+SCRIPT_VERSION="2"
 CURRENT_STEP=0
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 
 # -- Colors ---------------------------------------------------
 RED='\033[0;31m'
@@ -116,9 +119,10 @@ if [[ "$(uname -m)" != "arm64" ]]; then
     fail "MeetingNotes requires Apple Silicon (M1/M2/M3/M4) for whisper.cpp Metal GPU acceleration. Detected: $(uname -m)"
 fi
 
-# Repo must be cloned
-if [[ ! -f "$BASE_DIR/app/menubar.py" ]]; then
-    fail "MeetingNotes not found at ~/MeetingNotes.\nClone it first:\n  git clone https://github.com/SF-Phenom/MeetingNotes.git ~/MeetingNotes"
+# Repo presence (will be cloned in step 1 if missing)
+repo_present=false
+if [[ -f "$ENGINE_DIR/app/menubar.py" ]]; then
+    repo_present=true
 fi
 
 # Internet check
@@ -138,9 +142,52 @@ fi
 success "Pre-flight checks passed"
 
 # ============================================================
-# STEP 1: Xcode Command Line Tools
+# STEP 1: Clone MeetingNotes Repository
 # ============================================================
-step 1 "Xcode Command Line Tools"
+step 1 "Clone MeetingNotes repository"
+
+if $repo_present; then
+    already "MeetingNotes repo at $BASE_DIR"
+else
+    # git requires Xcode CLI tools — install inline if needed
+    if ! xcode-select -p &>/dev/null; then
+        info "Installing Xcode Command Line Tools (needed for git)..."
+        info "A dialog will appear — click 'Install' and wait for it to finish."
+        xcode-select --install 2>/dev/null || true
+
+        elapsed=0
+        while ! xcode-select -p &>/dev/null; do
+            if [[ $elapsed -ge 600 ]]; then
+                fail "Timed out waiting for Xcode CLI tools. Please install manually and re-run."
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+        done
+        success "Xcode CLI tools installed"
+    fi
+
+    info "Cloning MeetingNotes from GitHub..."
+    if ! git clone "$REPO_URL" "$BASE_DIR"; then
+        fail "Failed to clone repository. Check your internet connection and try again."
+    fi
+    success "MeetingNotes cloned to $BASE_DIR"
+    repo_present=true
+
+    # Self-update: if the repo's setup.command is newer, re-exec it
+    repo_script="$ENGINE_DIR/setup.command"
+    if [[ -f "$repo_script" ]]; then
+        repo_version=$(grep -m1 '^SCRIPT_VERSION=' "$repo_script" 2>/dev/null | cut -d'"' -f2)
+        if [[ -n "$repo_version" && "$repo_version" != "$SCRIPT_VERSION" ]]; then
+            info "Repo contains a newer setup.command (v$repo_version). Switching to it..."
+            exec "$repo_script" "$@"
+        fi
+    fi
+fi
+
+# ============================================================
+# STEP 2: Xcode Command Line Tools
+# ============================================================
+step 2 "Xcode Command Line Tools"
 
 if xcode-select -p &>/dev/null; then
     already "Xcode CLI tools"
@@ -164,7 +211,7 @@ fi
 # ============================================================
 # STEP 2: Homebrew
 # ============================================================
-step 2 "Homebrew"
+step 3 "Homebrew"
 
 if command -v brew &>/dev/null; then
     already "Homebrew"
@@ -196,7 +243,7 @@ fi
 # ============================================================
 # STEP 3: Brew Packages (Python 3.12, ffmpeg, cmake)
 # ============================================================
-step 3 "Brew packages (Python 3.12, ffmpeg, cmake)"
+step 4 "Brew packages (Python 3.12, ffmpeg, cmake)"
 
 missing_pkgs=()
 if ! command -v python3.12 &>/dev/null; then missing_pkgs+=(python@3.12); fi
@@ -214,7 +261,7 @@ fi
 # ============================================================
 # STEP 4: Python Virtual Environment + pip
 # ============================================================
-step 4 "Python virtual environment + packages"
+step 5 "Python virtual environment + packages"
 
 need_venv=false
 need_packages=false
@@ -244,7 +291,7 @@ fi
 
 if $need_packages; then
     info "Installing Python packages..."
-    "$VENV_DIR/bin/pip" install --quiet -r "$BASE_DIR/requirements.txt"
+    "$VENV_DIR/bin/pip" install --quiet -r "$ENGINE_DIR/requirements.txt"
     success "Python packages installed"
 else
     already "Python venv + packages"
@@ -253,7 +300,7 @@ fi
 # ============================================================
 # STEP 5: whisper.cpp (clone + build + model)
 # ============================================================
-step 5 "whisper.cpp (speech-to-text engine)"
+step 6 "whisper.cpp (speech-to-text engine)"
 
 # 5a: Clone
 if [[ -d "$WHISPER_DIR/.git" ]]; then
@@ -309,7 +356,7 @@ fi
 # ============================================================
 # STEP 6: Swift Audio Capture Binary
 # ============================================================
-step 6 "Swift audio capture binary"
+step 7 "Swift audio capture binary"
 
 if [[ -x "$CAPTURE_BINARY" ]]; then
     already "capture-audio binary"
@@ -317,14 +364,14 @@ else
     info "Building CaptureAudio (Swift)..."
     # Build in /tmp to avoid cloud sync (Google Drive/iCloud) locking build files
     build_tmp=$(mktemp -d)
-    cd "$BASE_DIR/CaptureAudio"
+    cd "$ENGINE_DIR/CaptureAudio"
     swift build -c release --scratch-path "$build_tmp" 2>&1 | tail -5 || true
 
     if [[ ! -f "$build_tmp/release/CaptureAudio" ]]; then
         fail "Swift build failed. Ensure macOS 14.2+ and Xcode CLI tools are installed."
     fi
 
-    mkdir -p "$BASE_DIR/.bin"
+    mkdir -p "$ENGINE_DIR/.bin"
     cp "$build_tmp/release/CaptureAudio" "$CAPTURE_BINARY"
     rm -rf "$build_tmp"
     cd "$BASE_DIR"
@@ -334,26 +381,27 @@ fi
 # ============================================================
 # STEP 7: Directory Structure
 # ============================================================
-step 7 "Directory structure"
+step 8 "Directory structure"
 
-mkdir -p "$BASE_DIR/recordings/active"
-mkdir -p "$BASE_DIR/recordings/queue"
+mkdir -p "$ENGINE_DIR/recordings/active"
+mkdir -p "$ENGINE_DIR/recordings/queue"
 mkdir -p "$BASE_DIR/transcripts"
 mkdir -p "$BASE_DIR/projects"
-mkdir -p "$BASE_DIR/logs"
-mkdir -p "$BASE_DIR/.bin"
-mkdir -p "$BASE_DIR/.credentials"
+mkdir -p "$BASE_DIR/Settings"
+mkdir -p "$ENGINE_DIR/logs"
+mkdir -p "$ENGINE_DIR/.bin"
+mkdir -p "$ENGINE_DIR/.credentials"
 success "Directories ready"
 
 # ============================================================
 # STEP 8: state.json
 # ============================================================
-step 8 "state.json"
+step 9 "state.json"
 
-if [[ -f "$BASE_DIR/state.json" ]]; then
+if [[ -f "$ENGINE_DIR/state.json" ]]; then
     already "state.json"
 else
-    cat <<'EOF' > "$BASE_DIR/state.json"
+    cat <<'EOF' > "$ENGINE_DIR/state.json"
 {
   "transcripts_since_checkin": 0,
   "last_checkin_date": null,
@@ -371,7 +419,7 @@ fi
 # ============================================================
 # STEP 9: Anthropic API Key
 # ============================================================
-step 9 "Anthropic API key"
+step 10 "Anthropic API key"
 
 api_key_set=false
 
@@ -417,7 +465,7 @@ fi
 # ============================================================
 # STEP 10: Obsidian
 # ============================================================
-step 10 "Obsidian (transcript viewer)"
+step 11 "Obsidian (transcript viewer)"
 
 if [[ -d "/Applications/Obsidian.app" ]] || brew list --cask obsidian &>/dev/null 2>&1; then
     already "Obsidian"
@@ -439,18 +487,19 @@ fi
 # ============================================================
 # STEP 11: Google Calendar (Optional)
 # ============================================================
-step 11 "Google Calendar integration (optional)"
+step 12 "Google Calendar integration (optional)"
 
-if [[ -f "$BASE_DIR/.credentials/google_token.json" ]]; then
+if [[ -f "$ENGINE_DIR/.credentials/google_token.json" ]]; then
     already "Google Calendar authenticated"
-elif [[ ! -f "$BASE_DIR/.credentials/google_oauth_client.json" ]]; then
-    warn "OAuth client JSON not found at .credentials/google_oauth_client.json"
-    info "Skipped. See SETUP.md section 7b for details."
+elif [[ ! -f "$ENGINE_DIR/.credentials/google_oauth_client.json" ]]; then
+    warn "OAuth client JSON not found at Engine/.credentials/google_oauth_client.json"
+    info "Skipped. See Engine/SETUP.md section 7b for details."
 else
     if confirm "Set up Google Calendar integration? (auto-populates meeting names)"; then
         info "Authenticating — a browser window will open. Sign in with your Phenom account."
-        cd "$BASE_DIR"
+        cd "$ENGINE_DIR"
         "$VENV_DIR/bin/python" -c "
+import sys; sys.path.insert(0, '.')
 from app.calendar_lookup import _get_credentials
 creds = _get_credentials()
 print('SUCCESS' if creds else 'FAILED')
@@ -480,6 +529,7 @@ check() {
     fi
 }
 
+check "MeetingNotes repo"       "test -f $ENGINE_DIR/app/menubar.py"
 check "Xcode CLI tools"        "xcode-select -p"
 check "Homebrew"                "command -v brew"
 check "Python 3.12"             "command -v python3.12"
@@ -493,8 +543,8 @@ check "capture-audio"           "test -x $CAPTURE_BINARY"
 check "ANTHROPIC_API_KEY"       "test -n \"\${ANTHROPIC_API_KEY:-}\""
 check "Obsidian"                "test -d /Applications/Obsidian.app"
 check "Obsidian vault"          "test -d $BASE_DIR/transcripts/.obsidian"
-check "Directory structure"     "test -d $BASE_DIR/recordings/queue"
-check "state.json"              "test -f $BASE_DIR/state.json"
+check "Directory structure"     "test -d $ENGINE_DIR/recordings/queue"
+check "state.json"              "test -f $ENGINE_DIR/state.json"
 
 echo ""
 if [[ $pass -eq $total ]]; then
@@ -512,14 +562,14 @@ echo "${BOLD}  MeetingNotes setup complete!${RESET}"
 echo "${BOLD}════════════════════════════════════════${RESET}"
 echo ""
 echo "  ${BOLD}To launch:${RESET}"
-echo "    Double-click ${BLUE}MeetingNotes.command${RESET} in Finder"
+echo "    Double-click ${BLUE}LaunchMeetingNotes.command${RESET} in Finder"
 echo "    (in ~/MeetingNotes/)"
 echo ""
 echo "  ${BOLD}To view transcripts:${RESET}"
 echo "    Open Obsidian → 'Open folder as vault' → ~/MeetingNotes/transcripts"
 echo ""
 echo "  ${BOLD}First time?${RESET}"
-echo "    Edit ${BLUE}~/MeetingNotes/context.md${RESET} with your role, team, and meeting info."
+echo "    Edit ${BLUE}~/MeetingNotes/Settings/context.md${RESET} with your role, team, and meeting info."
 echo "    macOS will prompt for Microphone, Accessibility, and Notification"
 echo "    permissions on first use."
 echo ""

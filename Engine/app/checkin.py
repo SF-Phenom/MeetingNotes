@@ -19,7 +19,7 @@ from app.state import BASE_DIR
 logger = logging.getLogger(__name__)
 TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
 PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
-CONTEXT_PATH = os.path.join(BASE_DIR, "context.md")
+CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
 
 CHECKIN_TRANSCRIPT_THRESHOLD = 6
 CHECKIN_DAY_THRESHOLD = 14
