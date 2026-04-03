@@ -3,8 +3,15 @@ MeetingNotes
 
 MeetingNotes automatically captures, transcribes, and summarizes your
 meetings. Audio is transcribed locally on your Mac using GPU acceleration
--- recordings never leave your machine. Only the transcript text is sent
-to Claude (Anthropic's AI) for summarization.
+-- recordings never leave your machine.
+
+Summarization works in two modes:
+
+  - If you have an Anthropic API key, transcript text (never audio) is
+    sent to Claude for high-quality summaries.
+  - If no API key is set, Claude is unreachable, or you're out of
+    tokens, summaries fall back to Qwen, a local model that runs
+    entirely on your Mac.
 
 
 HOW TO USE
@@ -94,9 +101,11 @@ No transcription after a meeting:
   If empty, the audio capture may not have permissions.
 
 Summaries say "unavailable":
-  Verify your API key is set. Open Terminal and run:
+  If you have an API key, verify it's set. Open Terminal and run:
     echo $ANTHROPIC_API_KEY
-  It should start with "sk-ant-".
+  It should start with "sk-ant-". Without an API key, summaries
+  use the local Qwen model -- if those also fail, the transcript
+  is still saved and can be summarized later.
 
 For more help, see Engine/SETUP.md or contact the person who
 shared this app with you.
