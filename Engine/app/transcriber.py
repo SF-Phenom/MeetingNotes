@@ -22,6 +22,7 @@ from app.state import BASE_DIR
 
 WHISPER_BINARY = os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
 WHISPER_MODEL = os.path.expanduser("~/whisper.cpp/models/ggml-large-v3-turbo.bin")
+VAD_MODEL = os.path.expanduser("~/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin")
 CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
 
 
@@ -212,6 +213,10 @@ def transcribe(wav_path: str, initial_prompt: str | None = None) -> Transcriptio
         "-l", "en",
         "--print-progress",
         "-pp",
+        "--vad",                   # Voice Activity Detection — skip silence
+        "--vad-model", VAD_MODEL,
+        "--suppress-nst",          # suppress non-speech tokens
+        "--entropy-thold", "2.0",  # stricter quality gate (default 2.4)
     ]
     if initial_prompt:
         cmd += ["--prompt", initial_prompt]
@@ -277,8 +282,12 @@ def transcribe(wav_path: str, initial_prompt: str | None = None) -> Transcriptio
     segments, duration_minutes = _parse_srt(srt_path)
 
     if segments:
+        from app.transcript_filter import filter_segments
+        segments = filter_segments(segments)
         timestamped_lines = [f"{ts} {text}" for ts, text in segments]
         timestamped_text = "\n".join(timestamped_lines)
+        # Rebuild plain_text from filtered segments so the summarizer gets clean input
+        plain_text = " ".join(text for _, text in segments)
     else:
         logger.warning("SRT parsed 0 segments from %s", srt_path)
         timestamped_text = plain_text
