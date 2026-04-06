@@ -25,8 +25,7 @@ Icon?
 .obsidian/
 
 # Credentials (per-user OAuth tokens, API keys)
-Engine/.credentials/google_token.json
-Engine/.credentials/*.pickle
+Engine/.credentials/
 .env
 
 # Legacy root-level artifacts (from pre-restructure installs)
