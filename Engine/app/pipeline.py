@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 
@@ -234,25 +235,44 @@ def process_recording(wav_path: str) -> str | None:
         logger.error("Failed to write transcript file: %s", e)
         return None
 
-    # Step 9: Update state
+    # Step 9: Update state and clean up recording
     try:
         current_state = state_mod.load()
         count = current_state.get("transcripts_since_checkin", 0) + 1
-        pending = list(current_state.get("pending_deletion", []))
-        pending.append(
-            {
-                "path": wav_path,
-                "recorded_date": date_str,
-            }
-        )
-        state_mod.update(
-            transcripts_since_checkin=count,
-            pending_deletion=pending,
-        )
+        retain = current_state.get("retain_recordings", False)
+
+        state_updates: dict = {"transcripts_since_checkin": count}
+
+        if retain:
+            # Move .wav (and sidecars) to done/ for 14-day retention
+            done_dir = os.path.join(
+                os.path.dirname(os.path.dirname(wav_path)), "done"
+            )
+            os.makedirs(done_dir, exist_ok=True)
+            done_wav = os.path.join(done_dir, os.path.basename(wav_path))
+            shutil.move(wav_path, done_wav)
+            base = os.path.splitext(wav_path)[0]
+            for ext in (".meta.json", ".srt"):
+                src = base + ext
+                if os.path.exists(src):
+                    shutil.move(src, os.path.join(done_dir, os.path.basename(src)))
+            pending = list(current_state.get("pending_deletion", []))
+            pending.append({"path": done_wav, "recorded_date": date_str})
+            state_updates["pending_deletion"] = pending
+            logger.info("Retained recording in %s", done_dir)
+        else:
+            # Delete .wav and sidecars immediately
+            base = os.path.splitext(wav_path)[0]
+            for path in (wav_path, base + ".meta.json", base + ".srt"):
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.info("Deleted: %s", path)
+
+        state_mod.update(**state_updates)
         logger.info(
-            "State updated: transcripts_since_checkin=%d, pending_deletion=%d items",
+            "State updated: transcripts_since_checkin=%d, retain_recordings=%s",
             count,
-            len(pending),
+            retain,
         )
     except Exception as e:  # noqa: BLE001
         logger.error("Failed to update state (non-fatal): %s", e)

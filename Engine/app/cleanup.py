@@ -20,6 +20,7 @@ from .state import BASE_DIR
 
 logger = logging.getLogger(__name__)
 QUEUE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "queue")
+DONE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "done")
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +124,9 @@ def delete_old_recordings(max_age_days: int = 14) -> int:
 
 def scan_for_orphans(max_age_days: int = 14) -> int:
     """
-    Delete .wav files in recordings/queue/ that are not tracked in state and
-    are older than max_age_days based on their filesystem modification time.
+    Delete .wav files in recordings/queue/ and recordings/done/ that are not
+    tracked in state and are older than max_age_days based on their filesystem
+    modification time.
 
     This catches files that somehow bypassed normal pipeline tracking.
 
@@ -134,10 +136,6 @@ def scan_for_orphans(max_age_days: int = 14) -> int:
     Returns:
         Number of orphaned files deleted.
     """
-    if not os.path.isdir(QUEUE_DIR):
-        logger.info("Queue directory does not exist; no orphans to scan.")
-        return 0
-
     cutoff_ts = (
         datetime.now() - timedelta(days=max_age_days)
     ).timestamp()
@@ -149,35 +147,39 @@ def scan_for_orphans(max_age_days: int = 14) -> int:
 
     total_deleted = 0
 
-    try:
-        entries = os.listdir(QUEUE_DIR)
-    except OSError as e:
-        logger.error("Could not list queue directory %s: %s", QUEUE_DIR, e)
-        return 0
-
-    for filename in entries:
-        if not filename.lower().endswith(".wav"):
-            continue
-
-        wav_path = os.path.join(QUEUE_DIR, filename)
-
-        if wav_path in tracked_paths:
-            # Tracked by state — leave for delete_old_recordings to handle
+    for scan_dir in (QUEUE_DIR, DONE_DIR):
+        if not os.path.isdir(scan_dir):
             continue
 
         try:
-            mtime = os.path.getmtime(wav_path)
+            entries = os.listdir(scan_dir)
         except OSError as e:
-            logger.warning("Could not stat %s: %s", wav_path, e)
+            logger.error("Could not list directory %s: %s", scan_dir, e)
             continue
 
-        if mtime <= cutoff_ts:
-            logger.info(
-                "Orphaned recording %s is older than %d days; deleting.",
-                filename,
-                max_age_days,
-            )
-            total_deleted += _delete_recording_and_sidecars(wav_path)
+        for filename in entries:
+            if not filename.lower().endswith(".wav"):
+                continue
+
+            wav_path = os.path.join(scan_dir, filename)
+
+            if wav_path in tracked_paths:
+                # Tracked by state — leave for delete_old_recordings to handle
+                continue
+
+            try:
+                mtime = os.path.getmtime(wav_path)
+            except OSError as e:
+                logger.warning("Could not stat %s: %s", wav_path, e)
+                continue
+
+            if mtime <= cutoff_ts:
+                logger.info(
+                    "Orphaned recording %s is older than %d days; deleting.",
+                    filename,
+                    max_age_days,
+                )
+                total_deleted += _delete_recording_and_sidecars(wav_path)
 
     logger.info(
         "scan_for_orphans complete: %d orphaned file(s) deleted.", total_deleted
