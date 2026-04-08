@@ -365,22 +365,22 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
 
     elapsed = time.time() - t0
 
-    # parakeet-mlx returns a dict with 'text' and 'segments'
-    # segments: list of dicts with 'start', 'end', 'text'
-    text = result.get("text", "").strip()
-    segments_raw = result.get("segments", [])
+    # parakeet-mlx returns an AlignedResult with .text and .sentences
+    # each sentence has .text, .start, .end, .duration, .confidence
+    text = result.text.strip()
+    sentences = result.sentences
 
-    if not text and not segments_raw:
+    if not text and not sentences:
         raise RuntimeError("Parakeet produced no output")
 
-    # Build timestamped text from segments
+    # Build timestamped text from sentences
     segments: list[tuple[str, str]] = []
     last_end_seconds = 0
 
-    for seg in segments_raw:
-        start_secs = seg.get("start", 0)
-        end_secs = seg.get("end", 0)
-        seg_text = seg.get("text", "").strip()
+    for sent in sentences:
+        start_secs = sent.start
+        end_secs = sent.end
+        seg_text = sent.text.strip()
         if not seg_text:
             continue
 

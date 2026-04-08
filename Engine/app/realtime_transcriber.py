@@ -183,7 +183,7 @@ class RealtimeTranscriber:
             result = self._model.transcribe(tmp_wav.name, decoding_config=decoding)
             elapsed = time.time() - t0
 
-            text = result.get("text", "").strip()
+            text = result.text.strip()
             total_secs = len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
 
             logger.info(
