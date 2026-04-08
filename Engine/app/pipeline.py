@@ -29,7 +29,7 @@ from . import state as state_mod
 from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .formatter import format_transcript, slugify
 from .summarizer import summarize
-from .transcriber import transcribe, _build_initial_prompt
+from .transcriber import transcribe, transcribe_with_parakeet, _build_initial_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +133,17 @@ def _write_transcript(content: str, date_str: str, title: str) -> str:
 
 # --- Public API --------------------------------------------------------------
 
-def process_recording(wav_path: str) -> str | None:
+def process_recording(
+    wav_path: str,
+    pre_transcribed_text: str | None = None,
+) -> str | None:
     """
     Run the full transcription pipeline for a .wav file.
 
     Args:
         wav_path: Path to a .wav file in recordings/queue/.
+        pre_transcribed_text: If provided (from realtime transcription), skip
+            the transcription step and use this text directly.
 
     Returns:
         Absolute path to the written .md transcript, or None on failure.
@@ -175,22 +180,39 @@ def process_recording(wav_path: str) -> str | None:
     except Exception as e:  # noqa: BLE001
         logger.warning("Calendar enrichment failed (non-fatal): %s", e)
 
-    # Step 3: Build initial prompt from context.md
-    initial_prompt = _build_initial_prompt()
-
-    # Step 4: Transcribe
+    # Step 3 & 4: Transcribe (or use pre-transcribed text from realtime mode)
     transcription = None
-    try:
-        transcription = transcribe(wav_path, initial_prompt=initial_prompt or None)
-        logger.info(
-            "Transcription done: %d chars, %d min",
-            len(transcription.plain_text),
-            transcription.duration_minutes,
+    if pre_transcribed_text:
+        from .transcriber import TranscriptionResult
+        logger.info("Using pre-transcribed text from realtime mode (%d chars)", len(pre_transcribed_text))
+        transcription = TranscriptionResult(
+            plain_text=pre_transcribed_text,
+            timestamped_text=pre_transcribed_text,
+            duration_minutes=0,
+            srt_path="",
         )
-    except Exception as e:  # noqa: BLE001
-        logger.error("Transcription failed: %s", e)
-        # Cannot continue without a transcript
-        return None
+    else:
+        current_state = state_mod.load()
+        mode = current_state.get("transcription_mode", "live")
+        if mode not in ("live", "batch"):
+            mode = "live"
+        try:
+            if mode == "live":
+                logger.info("Transcribing with Parakeet (live mode, batch pass)")
+                transcription = transcribe_with_parakeet(wav_path)
+            else:
+                initial_prompt = _build_initial_prompt()
+                logger.info("Transcribing with whisper.cpp (batch mode)")
+                transcription = transcribe(wav_path, initial_prompt=initial_prompt or None)
+            logger.info(
+                "Transcription done (%s): %d chars, %d min",
+                mode,
+                len(transcription.plain_text),
+                transcription.duration_minutes,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("Transcription failed: %s", e)
+            return None
 
     # Step 5: Load context.md for Claude
     context_md = _load_context_md()

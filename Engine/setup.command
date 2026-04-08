@@ -8,7 +8,7 @@ set -euo pipefail
 # ============================================================
 
 # -- Constants ------------------------------------------------
-BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes_RT}"
 WHISPER_DIR="$HOME/whisper.cpp"
 WHISPER_BINARY="$WHISPER_DIR/build/bin/whisper-cli"
 WHISPER_MODEL="$WHISPER_DIR/models/ggml-large-v3-turbo.bin"
@@ -295,6 +295,15 @@ if $need_packages; then
     success "Python packages installed"
 else
     already "Python venv + packages"
+fi
+
+# Pre-download the Parakeet model (~2.5 GB, cached in ~/.cache/huggingface/)
+if "$VENV_DIR/bin/python" -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')" &>/dev/null; then
+    already "Parakeet model"
+else
+    info "Downloading Parakeet model (~2.5 GB, this may take a few minutes)..."
+    "$VENV_DIR/bin/python" -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')"
+    success "Parakeet model downloaded"
 fi
 
 # ============================================================

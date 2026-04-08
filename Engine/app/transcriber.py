@@ -1,8 +1,11 @@
 """
-Transcriber — whisper.cpp subprocess integration for MeetingNotes.
+Transcriber — transcription engines for MeetingNotes.
 
-Calls the local whisper-cli binary to transcribe a .wav file and returns
-structured output with plain text, timestamped segments, and duration.
+Supports two engines:
+  - whisper: Calls the local whisper-cli binary (whisper.cpp)
+  - parakeet: Uses parakeet-mlx (Apple Silicon native via MLX)
+
+Both return a TranscriptionResult with the same shape.
 """
 
 from __future__ import annotations
@@ -304,4 +307,113 @@ def transcribe(wav_path: str, initial_prompt: str | None = None) -> Transcriptio
         timestamped_text=timestamped_text,
         duration_minutes=duration_minutes,
         srt_path=srt_path,
+    )
+
+
+# --- Parakeet engine ---------------------------------------------------------
+
+PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
+PARAKEET_BEAM_SIZE = 8
+
+_parakeet_model = None  # lazy-loaded, stays in memory for reuse
+
+
+def _load_parakeet_model():
+    """Load the parakeet-mlx model (lazy, cached across calls)."""
+    global _parakeet_model
+    if _parakeet_model is None:
+        logger.info("Loading parakeet-mlx model (first call, ~2.5 GB download on first use)...")
+        from parakeet_mlx import from_pretrained
+        _parakeet_model = from_pretrained(PARAKEET_MODEL_ID)
+        logger.info("Parakeet model loaded")
+    return _parakeet_model
+
+
+def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
+    """
+    Transcribe a .wav file using parakeet-mlx.
+
+    Args:
+        wav_path: Absolute path to the .wav file.
+
+    Returns:
+        TranscriptionResult with the same shape as the whisper path.
+
+    Raises:
+        FileNotFoundError: If the .wav file does not exist.
+        RuntimeError: If parakeet fails or produces no output.
+    """
+    wav_path = os.path.expanduser(wav_path)
+
+    if not os.path.exists(wav_path):
+        raise FileNotFoundError(f"WAV file not found: {wav_path}")
+
+    logger.info("Starting Parakeet transcription: %s", os.path.basename(wav_path))
+    t0 = time.time()
+
+    try:
+        from parakeet_mlx.parakeet import DecodingConfig, Beam
+        decoding = DecodingConfig(decoding=Beam(beam_size=PARAKEET_BEAM_SIZE))
+        model = _load_parakeet_model()
+        result = model.transcribe(wav_path, decoding_config=decoding)
+    except ImportError:
+        raise RuntimeError(
+            "parakeet-mlx is not installed. Run: pip install parakeet-mlx"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Parakeet transcription failed: {e}") from e
+
+    elapsed = time.time() - t0
+
+    # parakeet-mlx returns a dict with 'text' and 'segments'
+    # segments: list of dicts with 'start', 'end', 'text'
+    text = result.get("text", "").strip()
+    segments_raw = result.get("segments", [])
+
+    if not text and not segments_raw:
+        raise RuntimeError("Parakeet produced no output")
+
+    # Build timestamped text from segments
+    segments: list[tuple[str, str]] = []
+    last_end_seconds = 0
+
+    for seg in segments_raw:
+        start_secs = seg.get("start", 0)
+        end_secs = seg.get("end", 0)
+        seg_text = seg.get("text", "").strip()
+        if not seg_text:
+            continue
+
+        h = int(start_secs // 3600)
+        m = int((start_secs % 3600) // 60)
+        s = int(start_secs % 60)
+        timestamp = f"[{h:02d}:{m:02d}:{s:02d}]"
+        segments.append((timestamp, seg_text))
+        last_end_seconds = max(last_end_seconds, end_secs)
+
+    duration_minutes = max(1, round(last_end_seconds / 60))
+
+    # Apply the same transcript filter used for whisper output
+    if segments:
+        from app.transcript_filter import filter_segments
+        segments = filter_segments(segments)
+        timestamped_lines = [f"{ts} {text}" for ts, text in segments]
+        timestamped_text = "\n".join(timestamped_lines)
+        plain_text = " ".join(text for _, text in segments)
+    else:
+        timestamped_text = text
+        plain_text = text
+
+    logger.info(
+        "Parakeet transcription complete: %d segments, ~%d min, %.1fs wall time",
+        len(segments),
+        duration_minutes,
+        elapsed,
+    )
+
+    return TranscriptionResult(
+        plain_text=plain_text,
+        timestamped_text=timestamped_text,
+        duration_minutes=duration_minutes,
+        srt_path="",  # Parakeet doesn't produce SRT files
     )

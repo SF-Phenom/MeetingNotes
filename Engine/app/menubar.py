@@ -20,7 +20,7 @@ import time
 import rumps
 
 # Make sure the package can be imported when run directly
-_BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes"))
+_BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes_RT"))
 _ENGINE_DIR = os.path.join(_BASE_DIR, "Engine")
 if _ENGINE_DIR not in sys.path:
     sys.path.insert(0, _ENGINE_DIR)
@@ -32,6 +32,7 @@ from app import pipeline
 from app import checkin
 from app import cleanup
 from app import summarizer
+from app.realtime_transcriber import RealtimeTranscriber
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 
@@ -77,6 +78,9 @@ class MeetingNotesApp(rumps.App):
         self._prompt_pending: bool = False  # guard against double-prompts
         self._transcribing: bool = False  # True while background transcription runs
         self._checkin_due: bool = False  # True when check-in threshold is reached
+
+        # Realtime transcription
+        self._realtime_transcriber: RealtimeTranscriber | None = None
 
         # Model selection
         self._available_models: list[str] = []  # Ollama models discovered at startup
@@ -134,6 +138,9 @@ class MeetingNotesApp(rumps.App):
         # Model selection submenu
         items.append(self._build_model_submenu())
 
+        # Transcription mode submenu
+        items.append(self._build_mode_submenu())
+
         # Retain recordings toggle
         retain_item = rumps.MenuItem(
             "Retain Recordings",
@@ -176,13 +183,26 @@ class MeetingNotesApp(rumps.App):
     def _build_recording_menu(self, source: str, elapsed: str) -> None:
         """Construct the menu for the recording state."""
         self.menu.clear()
-        self.menu = [
+        items = [
             rumps.MenuItem("Stop Recording", callback=self._manual_stop),
             None,
             rumps.MenuItem("Recording: {} ({})".format(source, elapsed)),
+        ]
+
+        # Show "View Live Transcript" if realtime transcription is active
+        if self._realtime_transcriber and self._realtime_transcriber.live_transcript_path:
+            items.append(
+                rumps.MenuItem(
+                    "View Live Transcript",
+                    callback=self._open_live_transcript,
+                )
+            )
+
+        items.extend([
             None,
             rumps.MenuItem("Quit", callback=self._quit),
-        ]
+        ])
+        self.menu = items
         self.title = ICON_RECORDING
 
     # ── Timers ────────────────────────────────────────────────────────────────
@@ -322,6 +342,21 @@ class MeetingNotesApp(rumps.App):
             self._recording_start = time.time()
             if url:
                 state_mod.update(active_call_url=url)
+
+            # Start realtime transcription if mode is "live"
+            current_state = state_mod.load()
+            mode = current_state.get("transcription_mode", "live")
+            if mode not in ("live", "batch"):
+                mode = "live"
+            if mode == "live":
+                try:
+                    self._realtime_transcriber = RealtimeTranscriber()
+                    self._realtime_transcriber.start(path)
+                    logger.info("Realtime transcriber started")
+                except Exception as e:
+                    logger.error("Failed to start realtime transcriber: %s", e, exc_info=True)
+                    self._realtime_transcriber = None
+
             self._build_recording_menu(source, "0:00")
             logger.info("Recording started: path=%s", path)
         except Exception as e:
@@ -334,6 +369,19 @@ class MeetingNotesApp(rumps.App):
     def _do_stop_recording(self, notify: bool = False) -> None:
         """Stop recording and update the UI, then auto-transcribe."""
         try:
+            # Stop realtime transcriber first (if running) to get accumulated text
+            realtime_text = None
+            if self._realtime_transcriber:
+                try:
+                    realtime_text = self._realtime_transcriber.stop()
+                    logger.info(
+                        "Realtime transcriber stopped, got %d chars",
+                        len(realtime_text) if realtime_text else 0,
+                    )
+                except Exception as e:
+                    logger.error("Error stopping realtime transcriber: %s", e)
+                self._realtime_transcriber = None
+
             queue_path = recorder.stop_recording()
             self._recording_start = None
             self._build_idle_menu()
@@ -346,7 +394,10 @@ class MeetingNotesApp(rumps.App):
                 )
             # Auto-transcribe the recording that just finished
             if queue_path:
-                self._transcribe_in_background([queue_path])
+                self._transcribe_in_background(
+                    [queue_path],
+                    pre_transcribed_text=realtime_text,
+                )
         except Exception as e:
             logger.error("Failed to stop recording: %s", e, exc_info=True)
 
@@ -367,6 +418,12 @@ class MeetingNotesApp(rumps.App):
     def _quit(self, _sender) -> None:
         """Quit menu item — stop recording cleanly before exiting."""
         logger.info("Quit requested")
+        if self._realtime_transcriber:
+            try:
+                self._realtime_transcriber.stop()
+            except Exception as e:
+                logger.error("Error stopping realtime transcriber on quit: %s", e)
+            self._realtime_transcriber = None
         if recorder.is_recording():
             logger.info("Stopping active recording before quit")
             try:
@@ -418,7 +475,11 @@ class MeetingNotesApp(rumps.App):
             return
         self._transcribe_in_background(wav_files)
 
-    def _transcribe_in_background(self, wav_paths: list[str]) -> None:
+    def _transcribe_in_background(
+        self,
+        wav_paths: list[str],
+        pre_transcribed_text: str | None = None,
+    ) -> None:
         """Run transcription in a background thread so the UI stays responsive."""
         if self._transcribing:
             logger.warning("Transcription already in progress, skipping")
@@ -431,10 +492,14 @@ class MeetingNotesApp(rumps.App):
             succeeded = 0
             failed = 0
             last_path = None
-            for wav_path in wav_paths:
+            for i, wav_path in enumerate(wav_paths):
                 try:
                     logger.info("Transcribing: %s", os.path.basename(wav_path))
-                    result = pipeline.process_recording(wav_path)
+                    # Only the first file gets pre-transcribed text (from realtime)
+                    pre_text = pre_transcribed_text if i == 0 else None
+                    result = pipeline.process_recording(
+                        wav_path, pre_transcribed_text=pre_text
+                    )
                     if result:
                         succeeded += 1
                         last_path = result
@@ -510,7 +575,7 @@ class MeetingNotesApp(rumps.App):
     def _build_model_submenu(self) -> rumps.MenuItem:
         """Build the 'Model' submenu with available options."""
         current = summarizer.get_model_preference()
-        submenu = rumps.MenuItem("Model")
+        submenu = rumps.MenuItem("Summarization Model")
 
         # Automatic option
         auto_item = rumps.MenuItem(
@@ -574,6 +639,56 @@ class MeetingNotesApp(rumps.App):
                 count, "s" if count != 1 else ""
             ),
         )
+
+    # ── Transcription mode selection ──────────────────────────────────────────
+
+    def _build_mode_submenu(self) -> rumps.MenuItem:
+        """Build the 'Transcription Mode' submenu."""
+        current_mode = state_mod.load().get("transcription_mode", "live")
+        # Normalize legacy values from earlier versions
+        if current_mode not in ("live", "batch"):
+            current_mode = "live"
+            state_mod.update(transcription_mode="live")
+        submenu = rumps.MenuItem("Transcription Mode")
+
+        live_item = rumps.MenuItem(
+            "Live (parakeet-mlx)", callback=self._select_mode
+        )
+        if current_mode == "live":
+            live_item.state = 1
+        submenu.add(live_item)
+
+        batch_item = rumps.MenuItem(
+            "After Meeting (whisper.cpp)", callback=self._select_mode
+        )
+        if current_mode == "batch":
+            batch_item.state = 1
+        submenu.add(batch_item)
+
+        return submenu
+
+    def _select_mode(self, sender) -> None:
+        """Handle transcription mode selection."""
+        title = sender.title
+        if "After Meeting" in title:
+            mode = "batch"
+        else:
+            mode = "live"
+
+        state_mod.update(transcription_mode=mode)
+        logger.info("User selected transcription mode: %s", mode)
+        self._build_idle_menu()
+
+    # ── Live transcript viewer ────────────────────────────────────────────────
+
+    def _open_live_transcript(self, _sender) -> None:
+        """Open the live transcript file in the default text editor."""
+        if not self._realtime_transcriber or not self._realtime_transcriber.live_transcript_path:
+            return
+        path = self._realtime_transcriber.live_transcript_path
+        if os.path.exists(path):
+            import subprocess as sp
+            sp.Popen(["open", path])
 
     # ── Retain recordings toggle ────────────────────────────────────────────────
 
@@ -750,14 +865,26 @@ def main():
     try:
         current_state = state_mod.load()
         # Clear any stale recording state on startup
+        updates = {}
         if current_state.get("recording_active"):
             logger.warning("Stale recording_active=True found in state, clearing")
-            state_mod.update(
+            updates.update(
                 recording_active=False,
                 active_recording_path=None,
                 active_call_url=None,
                 active_call_source=None,
             )
+        # Remove deprecated transcription_engine key
+        if "transcription_engine" in current_state:
+            logger.info("Removing deprecated transcription_engine from state")
+            current_state.pop("transcription_engine")
+            state_mod.save(current_state)
+        # Normalize transcription_mode from older versions
+        mode = current_state.get("transcription_mode")
+        if mode not in ("live", "batch"):
+            updates["transcription_mode"] = "live"
+        if updates:
+            state_mod.update(**updates)
     except Exception as e:
         logger.error("Error initializing state: %s", e, exc_info=True)
 

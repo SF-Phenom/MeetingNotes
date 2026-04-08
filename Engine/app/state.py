@@ -12,7 +12,8 @@ state.json schema:
   "recording_active": bool,
   "active_recording_path": str|null,
   "active_call_url": str|null,
-  "active_call_source": str|null
+  "active_call_source": str|null,
+  "transcription_mode": str       # "live" | "batch"
 }
 """
 
@@ -22,7 +23,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes"))
+BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes_RT"))
 STATE_PATH = os.path.join(BASE_DIR, "Engine", "state.json")
 
 DEFAULT_STATE = {
@@ -35,6 +36,7 @@ DEFAULT_STATE = {
     "active_recording_path": None,
     "active_call_url": None,
     "active_call_source": None,
+    "transcription_mode": "live",       # "live" (parakeet) | "batch" (whisper)
 }
 
 

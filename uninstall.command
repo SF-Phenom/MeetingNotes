@@ -6,7 +6,7 @@ set -uo pipefail
 # Double-click this file in Finder, or run: ./uninstall.command
 # ============================================================
 
-BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes_RT}"
 
 # -- Colors ---------------------------------------------------
 RED='\033[0;31m'
