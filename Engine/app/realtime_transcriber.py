@@ -175,12 +175,18 @@ class RealtimeTranscriber:
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(pcm_data)
 
-            # Transcribe the complete audio so far
+            # Transcribe the complete audio so far.
+            # Use a dedicated GPU stream to avoid Metal command buffer
+            # collisions with the main thread's AppKit run loop.
+            import mlx.core as mx
             from parakeet_mlx.parakeet import DecodingConfig, Beam
             from app.transcriber import PARAKEET_BEAM_SIZE
             decoding = DecodingConfig(decoding=Beam(beam_size=PARAKEET_BEAM_SIZE))
+            stream = mx.new_stream(mx.gpu)
             t0 = time.time()
-            result = self._model.transcribe(tmp_wav.name, decoding_config=decoding)
+            with mx.stream(stream):
+                result = self._model.transcribe(tmp_wav.name, decoding_config=decoding)
+            mx.synchronize(stream)
             elapsed = time.time() - t0
 
             text = result.text.strip()

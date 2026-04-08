@@ -352,10 +352,16 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     t0 = time.time()
 
     try:
+        import mlx.core as mx
         from parakeet_mlx.parakeet import DecodingConfig, Beam
         decoding = DecodingConfig(decoding=Beam(beam_size=PARAKEET_BEAM_SIZE))
         model = _load_parakeet_model()
-        result = model.transcribe(wav_path, decoding_config=decoding)
+        # Use a dedicated GPU stream so background-thread inference doesn't
+        # collide with Metal command buffers on the main thread.
+        stream = mx.new_stream(mx.gpu)
+        with mx.stream(stream):
+            result = model.transcribe(wav_path, decoding_config=decoding)
+        mx.synchronize(stream)
     except ImportError:
         raise RuntimeError(
             "parakeet-mlx is not installed. Run: pip install parakeet-mlx"
