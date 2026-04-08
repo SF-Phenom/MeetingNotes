@@ -79,14 +79,19 @@ class RealtimeTranscriber:
         logger.info("Realtime transcriber started for %s", os.path.basename(wav_path))
 
     def stop(self) -> str:
-        """Stop polling and return the final accumulated transcript."""
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=30)
-            self._thread = None
+        """Stop polling and return the accumulated transcript immediately.
 
-        # Do one final transcription of any remaining audio
-        self._transcribe_new_audio(final=True)
+        Returns whatever text the background thread has produced so far
+        without blocking the main thread for a final transcription pass.
+        """
+        self._stop_event.set()
+
+        # Give the background thread a brief moment to finish if it's
+        # between iterations, but don't block the UI waiting for a long
+        # transcription pass to complete.
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
 
         # Clean up live transcript file
         if self._live_txt_path and os.path.exists(self._live_txt_path):
