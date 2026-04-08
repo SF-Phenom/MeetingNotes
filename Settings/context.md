@@ -1,7 +1,7 @@
 # Professional Context
 
 ## My Role
-[Your Name] — [Your Title] at Phenom
+[Your Name] — [Your Title] at [Your Company]
 [One sentence about what you do]
 
 ## Immediate Team & Org

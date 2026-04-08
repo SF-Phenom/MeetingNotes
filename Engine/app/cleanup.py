@@ -16,11 +16,9 @@ import os
 from datetime import date, datetime, timedelta
 
 from . import state as state_mod
-from .state import BASE_DIR
+from .state import QUEUE_DIR, DONE_DIR
 
 logger = logging.getLogger(__name__)
-QUEUE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "queue")
-DONE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "done")
 
 
 # ---------------------------------------------------------------------------

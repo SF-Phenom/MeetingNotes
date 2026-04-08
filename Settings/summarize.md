@@ -6,7 +6,7 @@ First, run this to see which transcripts need work:
 python -m app.needs_summary
 ```
 
-Then read `~/MeetingNotes/context.md` for my professional context.
+Then read `~/MeetingNotes_RT/Settings/context.md` for my professional context.
 
 For each transcript that needs summarization or re-summarization:
 

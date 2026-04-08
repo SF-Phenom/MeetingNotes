@@ -209,7 +209,7 @@ else
 fi
 
 # ============================================================
-# STEP 2: Homebrew
+# STEP 3: Homebrew
 # ============================================================
 step 3 "Homebrew"
 
@@ -241,7 +241,7 @@ else
 fi
 
 # ============================================================
-# STEP 3: Brew Packages (Python 3.12, ffmpeg, cmake)
+# STEP 4: Brew Packages (Python 3.12, ffmpeg, cmake)
 # ============================================================
 step 4 "Brew packages (Python 3.12, ffmpeg, cmake)"
 
@@ -259,7 +259,7 @@ else
 fi
 
 # ============================================================
-# STEP 4: Python Virtual Environment + pip
+# STEP 5: Python Virtual Environment + pip
 # ============================================================
 step 5 "Python virtual environment + packages"
 
@@ -307,7 +307,7 @@ else
 fi
 
 # ============================================================
-# STEP 5: whisper.cpp (clone + build + model)
+# STEP 6: whisper.cpp (clone + build + model)
 # ============================================================
 step 6 "whisper.cpp (speech-to-text engine)"
 
@@ -363,7 +363,7 @@ else
 fi
 
 # ============================================================
-# STEP 6: Swift Audio Capture Binary
+# STEP 7: Swift Audio Capture Binary
 # ============================================================
 step 7 "Swift audio capture binary"
 
@@ -388,7 +388,7 @@ else
 fi
 
 # ============================================================
-# STEP 7: Directory Structure
+# STEP 8: Directory Structure
 # ============================================================
 step 8 "Directory structure"
 
@@ -403,7 +403,7 @@ mkdir -p "$ENGINE_DIR/.credentials"
 success "Directories ready"
 
 # ============================================================
-# STEP 8: state.json
+# STEP 9: state.json
 # ============================================================
 step 9 "state.json"
 
@@ -419,14 +419,16 @@ else
   "recording_active": false,
   "active_recording_path": null,
   "active_call_url": null,
-  "active_call_source": null
+  "active_call_source": null,
+  "retain_recordings": false,
+  "transcription_mode": "live"
 }
 EOF
     success "state.json created"
 fi
 
 # ============================================================
-# STEP 9: Anthropic API Key
+# STEP 10: Anthropic API Key
 # ============================================================
 step 10 "Anthropic API key"
 
@@ -477,7 +479,7 @@ else
 fi
 
 # ============================================================
-# STEP 10: Obsidian
+# STEP 11: Obsidian
 # ============================================================
 step 11 "Obsidian (transcript viewer)"
 
@@ -494,12 +496,12 @@ if [[ -d "$BASE_DIR/transcripts/.obsidian" ]]; then
     already "Obsidian vault at transcripts/"
 else
     mkdir -p "$BASE_DIR/transcripts/.obsidian"
-    success "Obsidian vault created at ~/MeetingNotes/transcripts/"
-    info "Open Obsidian → 'Open folder as vault' → select ~/MeetingNotes/transcripts"
+    success "Obsidian vault created at $BASE_DIR/transcripts/"
+    info "Open Obsidian → 'Open folder as vault' → select $BASE_DIR/transcripts"
 fi
 
 # ============================================================
-# STEP 11: Ollama (local AI for summaries)
+# STEP 12: Ollama (local AI for summaries)
 # ============================================================
 step 12 "Ollama (local AI for summaries)"
 
@@ -538,7 +540,7 @@ else
 fi
 
 # ============================================================
-# STEP 12: Google Calendar (Optional)
+# STEP 13: Google Calendar (Optional)
 # ============================================================
 step 13 "Google Calendar integration (optional)"
 
@@ -549,7 +551,7 @@ elif [[ ! -f "$ENGINE_DIR/.credentials/google_oauth_client.json" ]]; then
     info "Skipped. See Engine/SETUP.md section 7b for details."
 else
     if confirm "Set up Google Calendar integration? (auto-populates meeting names)"; then
-        info "Authenticating — a browser window will open. Sign in with your Phenom account."
+        info "Authenticating — a browser window will open. Sign in with your Google account."
         cd "$ENGINE_DIR"
         "$VENV_DIR/bin/python" -c "
 import sys; sys.path.insert(0, '.')
@@ -617,13 +619,13 @@ echo "${BOLD}══════════════════════�
 echo ""
 echo "  ${BOLD}To launch:${RESET}"
 echo "    Double-click ${BLUE}LaunchMeetingNotes.command${RESET} in Finder"
-echo "    (in ~/MeetingNotes/)"
+echo "    (in $BASE_DIR/)"
 echo ""
 echo "  ${BOLD}To view transcripts:${RESET}"
-echo "    Open Obsidian → 'Open folder as vault' → ~/MeetingNotes/transcripts"
+echo "    Open Obsidian → 'Open folder as vault' → $BASE_DIR/transcripts"
 echo ""
 echo "  ${BOLD}First time?${RESET}"
-echo "    Edit ${BLUE}~/MeetingNotes/Settings/context.md${RESET} with your role, team, and meeting info."
+echo "    Edit ${BLUE}$BASE_DIR/Settings/context.md${RESET} with your role, team, and meeting info."
 echo "    macOS will prompt for Microphone, Accessibility, and Notification"
 echo "    permissions on first use."
 echo ""

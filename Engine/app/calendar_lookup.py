@@ -128,7 +128,6 @@ def lookup_meeting(
     """
     try:
         from googleapiclient.discovery import build
-        from googleapiclient.errors import HttpError
     except ImportError:
         logger.warning(
             "google-api-python-client not installed. Calendar lookup skipped."

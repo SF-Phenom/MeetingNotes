@@ -18,7 +18,7 @@ Future enhancements, roughly prioritized. Check items off as they're completed.
 
 ## Investigate
 
-- [ ] **Real-time transcription via Parakeet** — Investigate whether Nvidia's Parakeet models enable viable real-time (live, in-meeting) transcription on Apple Silicon. These two research areas are linked:
+- [x] **Real-time transcription via Parakeet** — Investigate whether Nvidia's Parakeet models enable viable real-time (live, in-meeting) transcription on Apple Silicon. These two research areas are linked:
   - **Why Parakeet matters for real-time:** whisper.cpp has a `stream` mode, but quality degrades significantly on short audio chunks. Parakeet claims 4x faster inference — if that holds on CoreML/ONNX via the Neural Engine, it may process chunks fast enough to keep up with live audio without sacrificing accuracy. Parakeet's speed is marginal for batch mode (whisper already finishes in minutes), but for real-time it could be the difference between viable and not.
   - **Research steps:** (1) Check Parakeet CoreML/ONNX conversion maturity for Apple Silicon. (2) Benchmark Parakeet vs. whisper.cpp on a real meeting recording in batch mode — compare speed and quality, especially proper noun handling. (3) Test Parakeet on streaming audio chunks — what chunk size maintains acceptable quality? (4) Evaluate whether Parakeet supports initial prompt biasing (we rely on this for name/term spelling).
   - **Architecture if viable:** Stream audio chunks to Parakeet in memory, accumulate partial transcripts, summarize at meeting end. Audio never hits disk. Optional mode alongside current batch pipeline, not a replacement.

@@ -60,25 +60,34 @@ KEPT_DATA=false
 if [[ -d "$BASE_DIR/transcripts" ]] && [[ -n "$(ls -A "$BASE_DIR/transcripts" 2>/dev/null)" ]]; then
     info "Moving transcripts to ~/MeetingNotes-data/transcripts..."
     mkdir -p "$HOME/MeetingNotes-data"
-    mv "$BASE_DIR/transcripts" "$HOME/MeetingNotes-data/transcripts"
-    KEPT_DATA=true
-    success "Transcripts preserved"
+    if ! mv "$BASE_DIR/transcripts" "$HOME/MeetingNotes-data/transcripts"; then
+        warn "Could not move transcripts — they remain at $BASE_DIR/transcripts"
+    else
+        KEPT_DATA=true
+        success "Transcripts preserved"
+    fi
 fi
 
 if [[ -d "$BASE_DIR/projects" ]] && [[ -n "$(ls -A "$BASE_DIR/projects" 2>/dev/null)" ]]; then
     info "Moving projects to ~/MeetingNotes-data/projects..."
     mkdir -p "$HOME/MeetingNotes-data"
-    mv "$BASE_DIR/projects" "$HOME/MeetingNotes-data/projects"
-    KEPT_DATA=true
-    success "Projects preserved"
+    if ! mv "$BASE_DIR/projects" "$HOME/MeetingNotes-data/projects"; then
+        warn "Could not move projects — they remain at $BASE_DIR/projects"
+    else
+        KEPT_DATA=true
+        success "Projects preserved"
+    fi
 fi
 
 if [[ -d "$BASE_DIR/Settings" ]]; then
     info "Moving Settings to ~/MeetingNotes-data/Settings..."
     mkdir -p "$HOME/MeetingNotes-data"
-    mv "$BASE_DIR/Settings" "$HOME/MeetingNotes-data/Settings"
-    KEPT_DATA=true
-    success "Settings preserved"
+    if ! mv "$BASE_DIR/Settings" "$HOME/MeetingNotes-data/Settings"; then
+        warn "Could not move Settings — they remain at $BASE_DIR/Settings"
+    else
+        KEPT_DATA=true
+        success "Settings preserved"
+    fi
 fi
 
 # ============================================================
@@ -104,12 +113,15 @@ fi
 # ============================================================
 # Remove ANTHROPIC_API_KEY from ~/.zshrc
 # ============================================================
-if grep -q 'ANTHROPIC_API_KEY' "$HOME/.zshrc" 2>/dev/null; then
+if grep -q '^export ANTHROPIC_API_KEY=' "$HOME/.zshrc" 2>/dev/null; then
     info "Removing ANTHROPIC_API_KEY from ~/.zshrc..."
-    # Create backup before modifying
     cp "$HOME/.zshrc" "$HOME/.zshrc.bak"
-    grep -v 'ANTHROPIC_API_KEY' "$HOME/.zshrc.bak" > "$HOME/.zshrc"
-    rm "$HOME/.zshrc.bak"
+    grep -v '^export ANTHROPIC_API_KEY=' "$HOME/.zshrc.bak" > "$HOME/.zshrc"
+    if [[ $? -eq 0 ]]; then
+        rm "$HOME/.zshrc.bak"
+    else
+        warn "Failed to update ~/.zshrc — backup at ~/.zshrc.bak"
+    fi
     unset ANTHROPIC_API_KEY 2>/dev/null
     success "API key removed from shell config"
 fi
@@ -117,11 +129,15 @@ fi
 # ============================================================
 # Remove MEETINGNOTES_HOME from ~/.zshrc (if set)
 # ============================================================
-if grep -q 'MEETINGNOTES_HOME' "$HOME/.zshrc" 2>/dev/null; then
+if grep -q '^export MEETINGNOTES_HOME=' "$HOME/.zshrc" 2>/dev/null; then
     info "Removing MEETINGNOTES_HOME from ~/.zshrc..."
     cp "$HOME/.zshrc" "$HOME/.zshrc.bak"
-    grep -v 'MEETINGNOTES_HOME' "$HOME/.zshrc.bak" > "$HOME/.zshrc"
-    rm "$HOME/.zshrc.bak"
+    grep -v '^export MEETINGNOTES_HOME=' "$HOME/.zshrc.bak" > "$HOME/.zshrc"
+    if [[ $? -eq 0 ]]; then
+        rm "$HOME/.zshrc.bak"
+    else
+        warn "Failed to update ~/.zshrc — backup at ~/.zshrc.bak"
+    fi
     success "MEETINGNOTES_HOME removed from shell config"
 fi
 

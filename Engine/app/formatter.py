@@ -2,7 +2,7 @@
 Formatter — builds the .md transcript file for MeetingNotes.
 
 Takes structured transcription and summary data and returns a markdown string
-suitable for writing to ~/MeetingNotes/transcripts/YYYY/MM/.
+suitable for writing to transcripts/YYYY/MM/.
 """
 
 from __future__ import annotations
@@ -80,7 +80,6 @@ def format_transcript(
         source: Recording source (e.g. "zoom", "teams")
         date_str: ISO date string "YYYY-MM-DD"
         time_str: Time string "HH-MM" or "HH:MM"
-        wav_filename: Original .wav filename for the frontmatter reference
 
     Returns:
         Complete markdown string.
@@ -163,7 +162,7 @@ def format_transcript(
     else:
         # Graceful degradation — Claude failed
         lines.append("## Summary")
-        lines.append("_Summary unavailable — Claude API call failed during processing._")
+        lines.append("_Summary unavailable — Summarization failed during processing._")
         lines.append("")
         lines.append("## Action Items")
         lines.append("_Action items unavailable._")

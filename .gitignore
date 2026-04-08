@@ -8,6 +8,8 @@ Engine/recordings/active/*.wav
 Engine/recordings/active/.lock
 Engine/recordings/queue/*.wav
 Engine/recordings/queue/*.meta.json
+Engine/recordings/done/
+Engine/recordings/active/*.live.txt
 
 # Python
 __pycache__/
@@ -26,9 +28,10 @@ Icon?
 
 # Credentials (per-user OAuth tokens, API keys)
 Engine/.credentials/
+/.claude/
 .env
 
-# Legacy root-level artifacts (from pre-restructure installs)
+# Legacy root-level artifacts (safe to remove after migration)
 /.bin/
 /.venv/
 /.credentials/

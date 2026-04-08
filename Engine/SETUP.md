@@ -4,15 +4,15 @@
 
 ## Quick Start (Recommended)
 
-Double-click `setup.command` in Finder, or run it from Terminal:
+Double-click `Engine/setup.command` in Finder, or run it from Terminal:
 
 ```bash
-cd ~/MeetingNotes
-./setup.command
+cd ~/MeetingNotes_RT
+./Engine/setup.command
 ```
 
 The script is idempotent (safe to re-run) and will skip anything already installed.
-It takes 10–20 minutes on a fresh machine, mostly due to the ~1.5GB whisper model download.
+It takes 10–20 minutes on a fresh machine, mostly due to model downloads (~4 GB total).
 
 If you prefer to install manually, or if the script hits an issue, follow the step-by-step guide below.
 
@@ -26,7 +26,7 @@ Follow these steps in order. Each section builds on the previous one.
 
 ## 1. Xcode Command Line Tools
 
-You likely already have these (Swift is working), but confirm:
+You likely already have these, but confirm:
 
 ```bash
 xcode-select --install
@@ -75,28 +75,28 @@ Should print `Python 3.12.x`.
 Create an isolated environment so packages don't conflict with your system:
 
 ```bash
-cd ~/MeetingNotes
-python3.12 -m venv .venv
-source .venv/bin/activate
+cd ~/MeetingNotes_RT
+python3.12 -m venv Engine/.venv
+source Engine/.venv/bin/activate
 ```
 
 Your terminal prompt should now show `(.venv)`. Install the dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install -r Engine/requirements.txt
 ```
 
 **Every time you open a new terminal** to work with MeetingNotes, activate the environment first:
 
 ```bash
-source ~/MeetingNotes/.venv/bin/activate
+source ~/MeetingNotes_RT/Engine/.venv/bin/activate
 ```
 
 ---
 
 ## 5. ffmpeg
 
-Needed for audio format conversion (used later in transcription pipeline):
+Needed for audio format conversion:
 
 ```bash
 brew install ffmpeg
@@ -104,9 +104,9 @@ brew install ffmpeg
 
 ---
 
-## 6. whisper.cpp with Metal Acceleration
+## 6. whisper.cpp with Metal Acceleration (Batch Mode)
 
-whisper.cpp runs speech-to-text locally on your Mac using the GPU (Metal). This keeps all audio on your machine.
+whisper.cpp runs speech-to-text locally using the GPU (Metal). This is the "batch" transcription engine — used for post-recording transcription.
 
 ```bash
 # Install cmake (build tool)
@@ -120,11 +120,18 @@ cmake -B build -DWHISPER_METAL=ON
 cmake --build build --config Release
 ```
 
-Download the model (large-v3-turbo — best quality/speed balance on M4, ~1.5GB RAM):
+Download the model (large-v3-turbo — best quality/speed balance on M4, ~1.5GB):
 
 ```bash
 cd ~/whisper.cpp
 ./models/download-ggml-model.sh large-v3-turbo
+```
+
+Download the Silero VAD model (Voice Activity Detection — filters silence):
+
+```bash
+cd ~/whisper.cpp/models
+curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/for-tests-silero-v6.2.0-ggml.bin
 ```
 
 Verify it works:
@@ -133,22 +140,38 @@ Verify it works:
 ~/whisper.cpp/build/bin/whisper-cli --help
 ```
 
-You should see the whisper.cpp help output. If so, you're good.
+You should see the whisper.cpp help output.
 
-**Alternative model:** If `large-v3-turbo` is too slow or uses too much memory, you can switch to `medium.en` (faster, English-only, ~750MB RAM):
+> **Note:** The whisper path defaults to `~/whisper.cpp`. To use a different location, set the `WHISPER_DIR` environment variable before launching the app.
+
+**Alternative model:** If `large-v3-turbo` is too slow, you can switch to `medium.en` (faster, English-only, ~750MB):
 ```bash
 ./models/download-ggml-model.sh medium.en
 ```
-Then edit `WHISPER_MODEL` in `app/transcriber.py` to point to the new model file.
+Then edit `WHISPER_MODEL` in `Engine/app/transcriber.py` to point to the new model file.
 
 ---
 
-## 7. Anthropic API Key
+## 7. Parakeet (Live Transcription Engine)
 
-The transcription pipeline sends transcript text (never audio) to Claude for summarization. You need an API key from [console.anthropic.com](https://console.anthropic.com/).
+Parakeet is the default transcription engine — it runs on Apple Silicon via MLX and provides real-time live transcription during recordings. It was installed with `pip install -r Engine/requirements.txt` in step 4.
+
+The model (~2.5 GB) downloads automatically the first time you start a recording in live mode. To pre-download:
 
 ```bash
-# Add to your shell profile (persists across terminal sessions)
+source Engine/.venv/bin/activate
+python3 -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')"
+```
+
+> **Transcription modes:** The app supports "live" (Parakeet, real-time) and "batch" (whisper.cpp, post-recording). You can switch modes from the menubar. Live is the default.
+
+---
+
+## 8. Anthropic API Key (Optional)
+
+The pipeline sends transcript text (never audio) to Claude for summarization. If you have an API key from [console.anthropic.com](https://console.anthropic.com/):
+
+```bash
 echo 'export ANTHROPIC_API_KEY=sk-ant-your-key-here' >> ~/.zshrc
 source ~/.zshrc
 ```
@@ -159,35 +182,46 @@ Verify:
 echo $ANTHROPIC_API_KEY
 ```
 
-Should print your key (starts with `sk-ant-`).
+**If you don't have a key:** The app will fall back to Ollama/Qwen for local summarization (see step 9). Transcription works regardless — only summarization uses the API.
 
 ---
 
-## 7b. Google Calendar Integration (Optional)
+## 9. Ollama + Qwen (Local Summarization Fallback)
 
-This auto-populates meeting name and participants from your Google Calendar. If you skip this step, the pipeline still works — you just won't get calendar metadata.
-
-**Prerequisites:** A Google Cloud project with the Calendar API enabled and an OAuth 2.0 "Desktop app" credential. If you've already set this up, you should have a JSON credential file.
-
-**Install the Google libraries** (if not already installed):
+If you don't have an Anthropic API key, or if the API is unreachable, the app falls back to a local model via [Ollama](https://ollama.ai):
 
 ```bash
-cd ~/MeetingNotes
-source .venv/bin/activate
-pip install -r requirements.txt
+brew install ollama
+ollama pull qwen3:4b
 ```
+
+Start the Ollama service:
+
+```bash
+ollama serve
+```
+
+Ollama runs in the background. The app auto-detects it when Claude is unavailable.
+
+---
+
+## 10. Google Calendar Integration (Optional)
+
+Auto-populates meeting name and participants from your Google Calendar. If you skip this, the pipeline still works — you just won't get calendar metadata.
+
+**Prerequisites:** A Google Cloud project with the Calendar API enabled and an OAuth 2.0 "Desktop app" credential.
 
 **Place the credential file:**
 
 ```bash
-mkdir -p ~/MeetingNotes/.credentials
-cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes/.credentials/google_oauth_client.json
+mkdir -p ~/MeetingNotes_RT/Engine/.credentials
+cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes_RT/Engine/.credentials/google_oauth_client.json
 ```
 
 **Authenticate** (one-time — opens a browser window):
 
 ```bash
-cd ~/MeetingNotes
+cd ~/MeetingNotes_RT/Engine
 source .venv/bin/activate
 python3 -c "
 from app.calendar_lookup import _get_credentials
@@ -196,13 +230,27 @@ print('SUCCESS' if creds else 'FAILED')
 "
 ```
 
-If it prints "SUCCESS", you're set. The token is saved to `.credentials/google_token.json` and will auto-refresh. You won't need to re-authenticate unless you revoke access.
-
-**How it works:** When a recording is processed, the pipeline checks your calendar for events that overlap with the recording's timestamp. If it finds a match, it pulls in the meeting title and attendee list automatically.
+The token is saved to `Engine/.credentials/google_token.json` and auto-refreshes.
 
 ---
 
-## 8. Obsidian (Transcript Viewer)
+## 11. Build the Swift Audio Capture Binary
+
+```bash
+cd ~/MeetingNotes_RT/Engine/CaptureAudio
+swift build -c release
+```
+
+Install the binary:
+
+```bash
+mkdir -p ~/MeetingNotes_RT/Engine/.bin
+cp .build/release/CaptureAudio ~/MeetingNotes_RT/Engine/.bin/capture-audio
+```
+
+---
+
+## 12. Obsidian (Transcript Viewer)
 
 Install [Obsidian](https://obsidian.md/) to browse and search your meeting transcripts:
 
@@ -210,92 +258,87 @@ Install [Obsidian](https://obsidian.md/) to browse and search your meeting trans
 brew install --cask obsidian
 ```
 
-Create the vault (a `.obsidian` folder marks the directory as a vault):
+Create the vault:
 
 ```bash
-mkdir -p ~/MeetingNotes/transcripts/.obsidian
+mkdir -p ~/MeetingNotes_RT/transcripts/.obsidian
 ```
 
-Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes/transcripts`.
-
-All your `.md` transcripts will appear in the sidebar, searchable and linked.
+Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes_RT/transcripts`.
 
 ---
 
-## 9. Build the Swift Audio Capture Binary
+## 13. macOS Permissions
 
-```bash
-cd ~/MeetingNotes/CaptureAudio
-swift build -c release
-```
-
-The binary will be at `.build/release/CaptureAudio`. To install it:
-
-```bash
-cp .build/release/CaptureAudio ~/MeetingNotes/.bin/capture-audio
-```
-
----
-
-## 10. macOS Permissions
-
-The app needs several permissions. macOS will prompt you the first time each is needed. Here's what to expect:
+The app needs several permissions. macOS will prompt you the first time each is needed:
 
 | Permission | Why | When prompted |
 |---|---|---|
-| **Microphone** | Record your side of calls | First time you start a recording |
-| **Accessibility** | Read window titles via AppleScript for call detection | First time the app checks for active calls |
-| **Notifications** | Show recording status and transcription alerts | First app launch |
+| **Microphone** | Record your side of calls | First recording start |
+| **Accessibility** | Read window titles for call detection | First app launch |
+| **Notifications** | Show recording/transcription alerts | First app launch |
 
-**To manage permissions later:** System Settings → Privacy & Security → [category]
-
-The audio capture binary requests microphone access. The Python menubar app requests Accessibility (for AppleScript). If a permission is denied, the relevant feature won't work — the app will log a warning.
+**To manage later:** System Settings → Privacy & Security → [category]
 
 ---
 
-## 11. Run the App
+## 14. Run the App
 
 ```bash
-cd ~/MeetingNotes
-source .venv/bin/activate
-python app/menubar.py
+cd ~/MeetingNotes_RT
+source Engine/.venv/bin/activate
+python Engine/app/menubar.py
 ```
 
 You should see a microphone icon (🎙) in your menu bar.
 
+Or just double-click `LaunchMeetingNotes.command` in Finder.
+
 ---
 
-## 12. First-Run Checklist
+## 15. First-Run Checklist
 
-- [ ] Menu bar icon appears
-- [ ] Edit `~/MeetingNotes/context.md` with your role, team, and meeting info
+- [ ] Menu bar icon appears (🎙)
+- [ ] Edit `Settings/context.md` with your role, team, and meeting info
 - [ ] Open a Google Meet in Chrome to test call detection
 - [ ] Try a manual recording start/stop from the menu bar
-- [ ] Check `~/MeetingNotes/recordings/queue/` for the recorded `.wav` file
-- [ ] After recording stops, transcription should auto-start (⏳ icon in menubar)
-- [ ] Check `~/MeetingNotes/transcripts/` for the generated `.md` file
-- [ ] Or transcribe manually: `python -m app.pipeline ~/MeetingNotes/recordings/queue/<filename>.wav`
+- [ ] Check `Engine/recordings/queue/` for the recorded `.wav` file
+- [ ] After recording stops, transcription should auto-start (⏳ icon)
+- [ ] Check `transcripts/` for the generated `.md` file
+- [ ] Or transcribe manually: `python -m app.pipeline Engine/recordings/queue/<filename>.wav`
+
+---
+
+## Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MEETINGNOTES_HOME` | `~/MeetingNotes_RT` | Base directory for the project |
+| `WHISPER_DIR` | `~/whisper.cpp` | Location of whisper.cpp installation |
+| `ANTHROPIC_API_KEY` | (none) | Claude API key for summarization |
 
 ---
 
 ## Troubleshooting
 
-**"Permission denied" errors:** Check System Settings → Privacy & Security. The app may need to be re-added after updates.
+**"Permission denied" errors:** Check System Settings → Privacy & Security.
 
-**Menu bar icon doesn't appear:** Make sure your virtual environment is activated (`source .venv/bin/activate`) and rumps is installed (`pip list | grep rumps`).
+**Menu bar icon doesn't appear:** Make sure your virtual environment is activated (`source Engine/.venv/bin/activate`) and rumps is installed (`pip list | grep rumps`).
 
-**No audio in recording:** Check that the correct microphone is selected in System Settings → Sound → Input. The system audio capture requires no configuration — it captures all app audio automatically.
+**No audio in recording:** Check System Settings → Sound → Input. System audio capture requires no configuration.
 
-**Swift binary won't compile:** Ensure Xcode Command Line Tools are installed (`xcode-select --install`). The binary requires macOS 14.2+ for the Core Audio tap API.
+**Swift binary won't compile:** Ensure Xcode Command Line Tools are installed. Requires macOS 14.2+.
 
-**Transcription fails with "whisper-cli not found":** Make sure you built whisper.cpp per step 6. The binary should be at `~/whisper.cpp/build/bin/whisper-cli`.
+**Transcription fails with "whisper-cli not found":** Build whisper.cpp per step 6. Binary should be at `~/whisper.cpp/build/bin/whisper-cli`.
 
 **Transcription fails with "model not found":** Download the model: `cd ~/whisper.cpp && ./models/download-ggml-model.sh large-v3-turbo`
 
-**Claude summarization fails:** Check that `ANTHROPIC_API_KEY` is set in your environment. The key must be exported before launching the app. If you added it to `~/.zshrc`, restart your terminal or run `source ~/.zshrc`.
+**Live transcription not working:** Ensure `parakeet-mlx` is installed (`pip list | grep parakeet`). The model downloads on first use (~2.5 GB).
 
-**Transcription runs but summary says "unavailable":** This means whisper succeeded but Claude API failed. Check `~/MeetingNotes/logs/app.log` for the specific error. The transcript is still saved with the raw text.
+**Claude summarization fails:** Check `ANTHROPIC_API_KEY` is set. If using Ollama fallback, ensure `ollama serve` is running.
 
-**setup.command failed partway through:** Re-run `./setup.command` — it skips completed steps and resumes where it left off.
+**Summary says "unavailable":** Transcription succeeded but summarization failed. Check `Engine/logs/app.log`. The transcript is still saved with raw text.
 
-**setup.command says "Apple Silicon required":** MeetingNotes requires an M-series Mac (M1/M2/M3/M4) for whisper.cpp Metal GPU acceleration. Intel Macs are not supported.
+**setup.command failed partway through:** Re-run — it skips completed steps and resumes.
+
+**Apple Silicon required:** MeetingNotes requires an M-series Mac for Metal GPU acceleration.

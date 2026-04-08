@@ -14,12 +14,10 @@ import subprocess
 from datetime import date, datetime
 
 from app import state
-from app.state import BASE_DIR
+from app.state import BASE_DIR, TRANSCRIPTS_DIR, CONTEXT_PATH
 
 logger = logging.getLogger(__name__)
-TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
 PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
-CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
 
 CHECKIN_TRANSCRIPT_THRESHOLD = 6
 CHECKIN_DAY_THRESHOLD = 14
@@ -125,7 +123,7 @@ def copy_prompt_to_clipboard() -> bool:
     """
     try:
         prompt = generate_checkin_prompt()
-        result = subprocess.run(
+        subprocess.run(
             ["pbcopy"],
             input=prompt.encode(),
             check=True,
@@ -153,7 +151,7 @@ def mark_checkin_complete() -> None:
 
 
 def _rel(path: str) -> str:
-    """Return path relative to BASE_DIR (~/MeetingNotes/)."""
+    """Return path relative to BASE_DIR."""
     try:
         return os.path.relpath(path, BASE_DIR)
     except ValueError:

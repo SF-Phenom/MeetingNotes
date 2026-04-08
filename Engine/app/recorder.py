@@ -18,13 +18,11 @@ import subprocess
 from datetime import datetime
 
 from . import state as state_mod
-from .state import BASE_DIR
+from .state import BASE_DIR, ACTIVE_DIR, QUEUE_DIR
 
 logger = logging.getLogger(__name__)
 BINARY = os.path.join(BASE_DIR, "Engine", ".bin", "capture-audio")
-ACTIVE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "active")
-QUEUE_DIR = os.path.join(BASE_DIR, "Engine", "recordings", "queue")
-LOCK_FILE = os.path.join(BASE_DIR, "Engine", "recordings", "active", ".lock")
+LOCK_FILE = os.path.join(ACTIVE_DIR, ".lock")
 
 _process: subprocess.Popen | None = None
 

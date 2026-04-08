@@ -91,11 +91,6 @@ def discover_ollama_models() -> list[str]:
         return []
 
 
-def is_ollama_available() -> bool:
-    """Return True if the Ollama server is reachable."""
-    return len(discover_ollama_models()) > 0
-
-
 # --- Prompt building ---------------------------------------------------------
 
 def _build_system_prompt(context_md: str) -> str:
@@ -269,13 +264,8 @@ def _summarize_ollama(
     }).encode()
 
     url = OLLAMA_BASE_URL + "/api/chat"
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
 
+    raw_text = ""
     last_error: Exception | None = None
     for attempt in range(1 + MAX_RETRIES):
         if attempt > 0:
@@ -286,6 +276,12 @@ def _summarize_ollama(
             )
             time.sleep(backoff)
 
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         try:
             t0 = time.time()
             with urllib.request.urlopen(req, timeout=300) as resp:

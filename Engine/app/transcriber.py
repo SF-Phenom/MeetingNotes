@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration -----------------------------------------------------------
 
-from app.state import BASE_DIR
+from app.state import CONTEXT_PATH
 
-WHISPER_BINARY = os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
-WHISPER_MODEL = os.path.expanduser("~/whisper.cpp/models/ggml-large-v3-turbo.bin")
-VAD_MODEL = os.path.expanduser("~/whisper.cpp/models/for-tests-silero-v6.2.0-ggml.bin")
-CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
+WHISPER_DIR = os.environ.get("WHISPER_DIR", os.path.expanduser("~/whisper.cpp"))
+WHISPER_BINARY = os.path.join(WHISPER_DIR, "build", "bin", "whisper-cli")
+WHISPER_MODEL = os.path.join(WHISPER_DIR, "models", "ggml-large-v3-turbo.bin")
+VAD_MODEL = os.path.join(WHISPER_DIR, "models", "for-tests-silero-v6.2.0-ggml.bin")
 
 
 # --- Data types --------------------------------------------------------------
@@ -41,7 +41,7 @@ class TranscriptionResult:
 
 # --- Helpers -----------------------------------------------------------------
 
-def _build_initial_prompt() -> str:
+def build_initial_prompt() -> str:
     """
     Read context.md and extract names and domain terms to bias whisper's
     transcription toward correct spellings.

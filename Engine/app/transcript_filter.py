@@ -1,8 +1,8 @@
 """
-Transcript filter — collapses repeated/hallucinated segments from whisper output.
+Transcript filter — collapses repeated/hallucinated segments from transcription output.
 
-Whisper.cpp can hallucinate repeated lines when it encounters silence or
-background noise.  This module provides a post-parse filter that collapses
+Transcription engines can hallucinate repeated lines when they encounter silence
+or background noise.  This module provides a post-parse filter that collapses
 consecutive duplicate or near-duplicate segments, keeping the first occurrence
 and annotating how many were removed.
 """

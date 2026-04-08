@@ -4,15 +4,15 @@ Pipeline — orchestrates the full transcription pipeline for MeetingNotes.
 process_recording(wav_path) is the single entry point:
   1. Load sidecar metadata (.meta.json)
   2. Parse source / date / time from filename
-  3. Build whisper initial prompt from context.md
-  4. Transcribe with whisper.cpp
-  5. Summarize with Claude
+  3. Build initial prompt from context.md (whisper mode)
+  4. Transcribe with Parakeet (live) or whisper.cpp (batch)
+  5. Summarize with Claude or Ollama
   6. Format and write the .md transcript
   7. Update state (transcripts_since_checkin, pending_deletion)
   8. Return the path to the written .md file
 
 Can be run standalone:
-    python -m app.pipeline ~/MeetingNotes/recordings/queue/some-recording.wav
+    python -m app.pipeline Engine/recordings/queue/some-recording.wav
 """
 
 from __future__ import annotations
@@ -29,15 +29,11 @@ from . import state as state_mod
 from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .formatter import format_transcript, slugify
 from .summarizer import summarize
-from .transcriber import transcribe, transcribe_with_parakeet, _build_initial_prompt
+from .transcriber import transcribe, transcribe_with_parakeet, build_initial_prompt
 
 logger = logging.getLogger(__name__)
 
-from .state import BASE_DIR
-
-# --- Configuration -----------------------------------------------------------
-TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
-CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
+from .state import BASE_DIR, TRANSCRIPTS_DIR, CONTEXT_PATH, DONE_DIR
 
 
 # --- Helpers -----------------------------------------------------------------
@@ -90,7 +86,7 @@ def _load_sidecar(wav_path: str) -> dict:
 
 
 def _load_context_md() -> str:
-    """Read ~/MeetingNotes/context.md. Returns empty string on failure."""
+    """Read Settings/context.md. Returns empty string on failure."""
     try:
         with open(CONTEXT_PATH, "r", encoding="utf-8") as f:
             return f.read()
@@ -201,7 +197,7 @@ def process_recording(
                 logger.info("Transcribing with Parakeet (live mode, batch pass)")
                 transcription = transcribe_with_parakeet(wav_path)
             else:
-                initial_prompt = _build_initial_prompt()
+                initial_prompt = build_initial_prompt()
                 logger.info("Transcribing with whisper.cpp (batch mode)")
                 transcription = transcribe(wav_path, initial_prompt=initial_prompt or None)
             logger.info(
@@ -267,11 +263,8 @@ def process_recording(
 
         if retain:
             # Move .wav (and sidecars) to done/ for 14-day retention
-            done_dir = os.path.join(
-                os.path.dirname(os.path.dirname(wav_path)), "done"
-            )
-            os.makedirs(done_dir, exist_ok=True)
-            done_wav = os.path.join(done_dir, os.path.basename(wav_path))
+            os.makedirs(DONE_DIR, exist_ok=True)
+            done_wav = os.path.join(DONE_DIR, os.path.basename(wav_path))
             shutil.move(wav_path, done_wav)
             base = os.path.splitext(wav_path)[0]
             for ext in (".meta.json", ".srt"):
@@ -279,9 +272,11 @@ def process_recording(
                 if os.path.exists(src):
                     shutil.move(src, os.path.join(done_dir, os.path.basename(src)))
             pending = list(current_state.get("pending_deletion", []))
-            pending.append({"path": done_wav, "recorded_date": date_str})
+            # Deduplicate: don't add if this path is already pending
+            if not any(e.get("path") == done_wav for e in pending):
+                pending.append({"path": done_wav, "recorded_date": date_str})
             state_updates["pending_deletion"] = pending
-            logger.info("Retained recording in %s", done_dir)
+            logger.info("Retained recording in %s", DONE_DIR)
         else:
             # Delete .wav and sidecars immediately
             base = os.path.splitext(wav_path)[0]

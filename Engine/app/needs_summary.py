@@ -12,10 +12,8 @@ Usage:
 from __future__ import annotations
 
 import os
-import sys
 
-from app.state import BASE_DIR
-TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
+from app.state import BASE_DIR, TRANSCRIPTS_DIR
 
 
 def scan_transcripts() -> dict:

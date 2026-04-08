@@ -1,6 +1,6 @@
 """
 State management for MeetingNotes.
-Manages ~/MeetingNotes/state.json with atomic writes.
+Manages Engine/state.json with atomic, file-locked writes.
 
 state.json schema:
 {
@@ -17,6 +17,7 @@ state.json schema:
 }
 """
 
+import fcntl
 import json
 import os
 import logging
@@ -25,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes_RT"))
 STATE_PATH = os.path.join(BASE_DIR, "Engine", "state.json")
+
+# Shared path constants — import these instead of redefining per module
+ENGINE_DIR = os.path.join(BASE_DIR, "Engine")
+QUEUE_DIR = os.path.join(ENGINE_DIR, "recordings", "queue")
+ACTIVE_DIR = os.path.join(ENGINE_DIR, "recordings", "active")
+DONE_DIR = os.path.join(ENGINE_DIR, "recordings", "done")
+TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
+CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
 
 DEFAULT_STATE = {
     "transcripts_since_checkin": 0,
@@ -58,21 +67,46 @@ def load() -> dict:
 
 
 def save(state: dict) -> None:
-    """Write state atomically: write to .tmp then os.rename()."""
+    """Write state atomically with file locking: lock, write .tmp, rename."""
+    lock_path = STATE_PATH + ".lock"
     tmp_path = STATE_PATH + ".tmp"
     try:
-        with open(tmp_path, "w") as f:
-            json.dump(state, f, indent=2)
-            f.write("\n")
-        os.rename(tmp_path, STATE_PATH)
+        with open(lock_path, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                with open(tmp_path, "w") as f:
+                    json.dump(state, f, indent=2)
+                    f.write("\n")
+                os.rename(tmp_path, STATE_PATH)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
     except OSError as e:
         logger.error("Failed to save state.json: %s", e)
         raise
 
 
 def update(**kwargs) -> dict:
-    """Load state, merge kwargs, save, and return the updated state."""
-    state = load()
-    state.update(kwargs)
-    save(state)
-    return state
+    """Load state, merge kwargs, save, and return the updated state.
+
+    Uses file locking to prevent concurrent read-modify-write races
+    between the main thread and background transcription threads.
+    """
+    lock_path = STATE_PATH + ".lock"
+    try:
+        with open(lock_path, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                state = load()
+                state.update(kwargs)
+                # Write directly (we already hold the lock)
+                tmp_path = STATE_PATH + ".tmp"
+                with open(tmp_path, "w") as f:
+                    json.dump(state, f, indent=2)
+                    f.write("\n")
+                os.rename(tmp_path, STATE_PATH)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+        return state
+    except OSError as e:
+        logger.error("Failed to update state.json: %s", e)
+        raise

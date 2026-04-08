@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import os
-import struct
 import tempfile
 import threading
 import time
@@ -137,7 +136,7 @@ class RealtimeTranscriber:
         self._model = from_pretrained(PARAKEET_MODEL_ID)
         logger.info("Parakeet model loaded for realtime")
 
-    def _transcribe_new_audio(self, final: bool = False) -> None:
+    def _transcribe_new_audio(self) -> None:
         """Read new bytes from the WAV file and transcribe if enough has accumulated."""
         if not self._wav_path or not os.path.exists(self._wav_path):
             return
@@ -150,7 +149,7 @@ class RealtimeTranscriber:
 
         # Check if we have enough new audio to bother transcribing
         new_secs = new_bytes_available / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
-        if not final and new_secs < MIN_NEW_AUDIO_SECS:
+        if new_secs < MIN_NEW_AUDIO_SECS:
             return
 
         # Read all audio from the beginning (after header) for full context

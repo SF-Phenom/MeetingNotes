@@ -3,7 +3,7 @@ MeetingNotes menubar application.
 
 Run with:
     python Engine/app/menubar.py
-from ~/MeetingNotes/
+from ~/MeetingNotes_RT/
 
 Requires: rumps, psutil, anthropic
 """
@@ -58,7 +58,7 @@ ICON_PENDING = "📝"
 ICON_TRANSCRIBING = "⏳"
 ICON_CHECKIN = "🔔"
 
-_QUEUE_DIR = os.path.join(_BASE_DIR, "Engine", "recordings", "queue")
+_QUEUE_DIR = state_mod.QUEUE_DIR
 
 # ─── MeetingNotes App ─────────────────────────────────────────────────────────
 
@@ -732,14 +732,18 @@ class MeetingNotesApp(rumps.App):
         # Persist to ~/.zshrc
         try:
             zshrc_path = os.path.expanduser("~/.zshrc")
-            # Remove any existing ANTHROPIC_API_KEY line
+            # Remove any existing ANTHROPIC_API_KEY export line
             lines = []
             if os.path.exists(zshrc_path):
                 with open(zshrc_path, "r") as f:
-                    lines = [l for l in f.readlines() if "ANTHROPIC_API_KEY" not in l]
+                    lines = [l for l in f.readlines()
+                             if not l.lstrip().startswith("export ANTHROPIC_API_KEY=")]
             lines.append('export ANTHROPIC_API_KEY="{}"\n'.format(api_key))
-            with open(zshrc_path, "w") as f:
+            # Atomic write: temp file then rename
+            tmp_path = zshrc_path + ".tmp"
+            with open(tmp_path, "w") as f:
                 f.writelines(lines)
+            os.rename(tmp_path, zshrc_path)
             logger.info("API key saved to ~/.zshrc")
         except OSError as e:
             logger.error("Failed to save API key to ~/.zshrc: %s", e)
@@ -772,8 +776,13 @@ class MeetingNotesApp(rumps.App):
                 ["git", "-C", _BASE_DIR, "rev-parse", "HEAD"],
                 capture_output=True, text=True, timeout=5,
             ).stdout.strip()
+            # Get current branch name
+            branch = sp.run(
+                ["git", "-C", _BASE_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip() or "main"
             remote = sp.run(
-                ["git", "-C", _BASE_DIR, "rev-parse", "origin/main"],
+                ["git", "-C", _BASE_DIR, "rev-parse", f"origin/{branch}"],
                 capture_output=True, text=True, timeout=5,
             ).stdout.strip()
         except Exception as e:
