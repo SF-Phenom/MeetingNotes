@@ -315,23 +315,53 @@ def transcribe(wav_path: str, initial_prompt: str | None = None) -> Transcriptio
 PARAKEET_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v3"
 PARAKEET_BEAM_SIZE = 8
 
+# Maximum chunk duration (seconds) for batch Parakeet transcription.
+# Keeps GPU memory bounded on 16 GB unified-memory machines.
+PARAKEET_CHUNK_SECS = 300  # 5 minutes
+
+# Hard cap on GPU memory MLX is allowed to use (bytes).
+# Leaves headroom for macOS, the app, and other processes.
+MLX_MEMORY_LIMIT = 6 * 1024 * 1024 * 1024  # 6 GB
+
 _parakeet_model = None  # lazy-loaded, stays in memory for reuse
+_parakeet_stream = None  # reusable MLX GPU stream
 
 
 def _load_parakeet_model():
-    """Load the parakeet-mlx model (lazy, cached across calls)."""
-    global _parakeet_model
+    """Load the parakeet-mlx model and create a reusable GPU stream."""
+    global _parakeet_model, _parakeet_stream
     if _parakeet_model is None:
+        import mlx.core as mx
+        # Cap GPU memory so Parakeet can't starve the system
+        mx.metal.set_memory_limit(MLX_MEMORY_LIMIT)
+        logger.info(
+            "MLX GPU memory limit set to %.1f GB",
+            MLX_MEMORY_LIMIT / (1024 ** 3),
+        )
         logger.info("Loading parakeet-mlx model (first call, ~2.5 GB download on first use)...")
         from parakeet_mlx import from_pretrained
         _parakeet_model = from_pretrained(PARAKEET_MODEL_ID)
+        _parakeet_stream = mx.new_stream(mx.gpu)
         logger.info("Parakeet model loaded")
     return _parakeet_model
+
+
+def _transcribe_chunk(model, wav_chunk_path: str, decoding) -> object:
+    """Transcribe a single WAV chunk and free GPU memory afterward."""
+    import mlx.core as mx
+    with mx.stream(_parakeet_stream):
+        result = model.transcribe(wav_chunk_path, decoding_config=decoding)
+    mx.synchronize(_parakeet_stream)
+    mx.metal.clear_cache()
+    return result
 
 
 def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     """
     Transcribe a .wav file using parakeet-mlx.
+
+    Long recordings are split into chunks of PARAKEET_CHUNK_SECS to keep
+    GPU memory bounded and avoid freezing the system.
 
     Args:
         wav_path: Absolute path to the .wav file.
@@ -343,6 +373,9 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
         FileNotFoundError: If the .wav file does not exist.
         RuntimeError: If parakeet fails or produces no output.
     """
+    import wave as wave_mod
+    import tempfile
+
     wav_path = os.path.expanduser(wav_path)
 
     if not os.path.exists(wav_path):
@@ -351,68 +384,124 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     logger.info("Starting Parakeet transcription: %s", os.path.basename(wav_path))
     t0 = time.time()
 
+    # Read WAV metadata to determine if chunking is needed
+    try:
+        with wave_mod.open(wav_path, "rb") as wf:
+            n_channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+    except Exception as e:
+        raise RuntimeError(f"Could not read WAV file: {e}") from e
+
+    duration_secs = n_frames / framerate
+    chunk_frames = int(PARAKEET_CHUNK_SECS * framerate)
+
     try:
         import mlx.core as mx
         from parakeet_mlx.parakeet import DecodingConfig, Beam
         decoding = DecodingConfig(decoding=Beam(beam_size=PARAKEET_BEAM_SIZE))
         model = _load_parakeet_model()
-        # Use a dedicated GPU stream so background-thread inference doesn't
-        # collide with Metal command buffers on the main thread.
-        stream = mx.new_stream(mx.gpu)
-        with mx.stream(stream):
-            result = model.transcribe(wav_path, decoding_config=decoding)
-        mx.synchronize(stream)
     except ImportError:
         raise RuntimeError(
             "parakeet-mlx is not installed. Run: pip install parakeet-mlx"
         )
-    except Exception as e:
-        raise RuntimeError(f"Parakeet transcription failed: {e}") from e
+
+    all_segments: list[tuple[str, str]] = []
+    last_end_seconds = 0
+
+    if duration_secs <= PARAKEET_CHUNK_SECS:
+        # Short recording — transcribe in one pass
+        logger.info("Recording is %.0fs, transcribing in one pass", duration_secs)
+        try:
+            result = _transcribe_chunk(model, wav_path, decoding)
+        except Exception as e:
+            raise RuntimeError(f"Parakeet transcription failed: {e}") from e
+
+        all_segments, last_end_seconds = _extract_segments(result, time_offset=0)
+    else:
+        # Long recording — split into chunks
+        n_chunks = int((n_frames + chunk_frames - 1) // chunk_frames)
+        logger.info(
+            "Recording is %.0fs, splitting into %d chunks of %ds each",
+            duration_secs, n_chunks, PARAKEET_CHUNK_SECS,
+        )
+
+        with wave_mod.open(wav_path, "rb") as wf:
+            for chunk_idx in range(n_chunks):
+                offset_frames = chunk_idx * chunk_frames
+                frames_to_read = min(chunk_frames, n_frames - offset_frames)
+                time_offset = offset_frames / framerate
+
+                wf.setpos(offset_frames)
+                pcm_data = wf.readframes(frames_to_read)
+
+                # Write chunk to a temporary WAV file
+                tmp_path = None
+                try:
+                    tmp_fd = tempfile.NamedTemporaryFile(
+                        suffix=".wav", delete=False,
+                        dir=os.path.dirname(wav_path),
+                    )
+                    tmp_path = tmp_fd.name
+                    with wave_mod.open(tmp_path, "wb") as chunk_wf:
+                        chunk_wf.setnchannels(n_channels)
+                        chunk_wf.setsampwidth(sample_width)
+                        chunk_wf.setframerate(framerate)
+                        chunk_wf.writeframes(pcm_data)
+
+                    chunk_t0 = time.time()
+                    logger.info(
+                        "Transcribing chunk %d/%d (%.0fs–%.0fs)",
+                        chunk_idx + 1, n_chunks,
+                        time_offset, time_offset + frames_to_read / framerate,
+                    )
+                    result = _transcribe_chunk(model, tmp_path, decoding)
+                    chunk_elapsed = time.time() - chunk_t0
+                    logger.info(
+                        "Chunk %d/%d done in %.1fs",
+                        chunk_idx + 1, n_chunks, chunk_elapsed,
+                    )
+
+                    chunk_segs, chunk_end = _extract_segments(
+                        result, time_offset=time_offset,
+                    )
+                    all_segments.extend(chunk_segs)
+                    last_end_seconds = max(last_end_seconds, chunk_end)
+
+                except Exception as e:
+                    logger.error(
+                        "Parakeet chunk %d/%d failed: %s",
+                        chunk_idx + 1, n_chunks, e,
+                    )
+                    # Continue with remaining chunks rather than aborting
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+
+                # Release the pcm_data buffer immediately
+                del pcm_data
 
     elapsed = time.time() - t0
 
-    # parakeet-mlx returns an AlignedResult with .text and .sentences
-    # each sentence has .text, .start, .end, .duration, .confidence
-    text = result.text.strip()
-    sentences = result.sentences
-
-    if not text and not sentences:
+    if not all_segments:
         raise RuntimeError("Parakeet produced no output")
-
-    # Build timestamped text from sentences
-    segments: list[tuple[str, str]] = []
-    last_end_seconds = 0
-
-    for sent in sentences:
-        start_secs = sent.start
-        end_secs = sent.end
-        seg_text = sent.text.strip()
-        if not seg_text:
-            continue
-
-        h = int(start_secs // 3600)
-        m = int((start_secs % 3600) // 60)
-        s = int(start_secs % 60)
-        timestamp = f"[{h:02d}:{m:02d}:{s:02d}]"
-        segments.append((timestamp, seg_text))
-        last_end_seconds = max(last_end_seconds, end_secs)
 
     duration_minutes = max(1, round(last_end_seconds / 60))
 
     # Apply the same transcript filter used for whisper output
-    if segments:
-        from app.transcript_filter import filter_segments
-        segments = filter_segments(segments)
-        timestamped_lines = [f"{ts} {text}" for ts, text in segments]
-        timestamped_text = "\n".join(timestamped_lines)
-        plain_text = " ".join(text for _, text in segments)
-    else:
-        timestamped_text = text
-        plain_text = text
+    from app.transcript_filter import filter_segments
+    all_segments = filter_segments(all_segments)
+    timestamped_lines = [f"{ts} {txt}" for ts, txt in all_segments]
+    timestamped_text = "\n".join(timestamped_lines)
+    plain_text = " ".join(txt for _, txt in all_segments)
 
     logger.info(
         "Parakeet transcription complete: %d segments, ~%d min, %.1fs wall time",
-        len(segments),
+        len(all_segments),
         duration_minutes,
         elapsed,
     )
@@ -423,3 +512,31 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
         duration_minutes=duration_minutes,
         srt_path="",  # Parakeet doesn't produce SRT files
     )
+
+
+def _extract_segments(
+    result, time_offset: float = 0,
+) -> tuple[list[tuple[str, str]], float]:
+    """
+    Extract (timestamp, text) segments from a Parakeet AlignedResult.
+
+    Adds time_offset to all timestamps so chunks are stitched correctly.
+    Returns (segments, last_end_seconds).
+    """
+    segments: list[tuple[str, str]] = []
+    last_end = 0.0
+
+    for sent in result.sentences:
+        seg_text = sent.text.strip()
+        if not seg_text:
+            continue
+        abs_start = sent.start + time_offset
+        abs_end = sent.end + time_offset
+        h = int(abs_start // 3600)
+        m = int((abs_start % 3600) // 60)
+        s = int(abs_start % 60)
+        timestamp = f"[{h:02d}:{m:02d}:{s:02d}]"
+        segments.append((timestamp, seg_text))
+        last_end = max(last_end, abs_end)
+
+    return segments, last_end

@@ -6,6 +6,11 @@ The Swift audio capture binary writes PCM data to a WAV file continuously.
 This module polls that file, reads new audio bytes, and periodically
 transcribes accumulated audio to produce partial transcripts.
 
+Audio is divided into fixed-size chunks (MAX_CHUNK_SECS each).  Each chunk
+is re-transcribed as it grows, and when a chunk boundary is crossed, its
+text is finalized and the next chunk begins.  This keeps GPU memory and
+inference time bounded regardless of recording length.
+
 Usage:
     rt = RealtimeTranscriber()
     rt.start(wav_path)        # begins background polling + transcription
@@ -30,11 +35,16 @@ POLL_INTERVAL = 15
 # Minimum new audio (seconds) before triggering a transcription
 MIN_NEW_AUDIO_SECS = 5
 
+# Fixed chunk size (seconds).  Each chunk is transcribed independently;
+# completed chunks are finalized as text and never re-processed.
+MAX_CHUNK_SECS = 300
+
 # WAV format constants (must match Swift capture binary output)
 SAMPLE_RATE = 16000
 SAMPLE_WIDTH = 2  # 16-bit
 CHANNELS = 1
 WAV_HEADER_SIZE = 44
+BYTES_PER_SEC = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
 
 
 class RealtimeTranscriber:
@@ -45,14 +55,25 @@ class RealtimeTranscriber:
         self._live_txt_path: str | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._accumulated_text: str = ""
-        self._bytes_read: int = WAV_HEADER_SIZE  # skip WAV header
         self._model = None
+        self._stream = None  # Reusable MLX GPU stream
+        self._transcribing: bool = False  # Guard against overlapping cycles
+
+        # Chunk tracking
+        self._chunk_index: int = 0  # Which fixed chunk we're transcribing
+        self._chunk_texts: list[str] = []  # Finalized text per completed chunk
+        self._current_chunk_text: str = ""  # Latest text for the in-progress chunk
+        self._last_file_size: int = WAV_HEADER_SIZE  # Last observed file size
 
     @property
     def live_transcript_path(self) -> str | None:
         """Path to the .live.txt file that updates during recording."""
         return self._live_txt_path
+
+    @property
+    def is_busy(self) -> bool:
+        """True if a transcription cycle is currently running on the GPU."""
+        return self._transcribing
 
     def start(self, wav_path: str) -> None:
         """Begin polling the WAV file and transcribing in the background."""
@@ -61,8 +82,10 @@ class RealtimeTranscriber:
             return
 
         self._wav_path = wav_path
-        self._bytes_read = WAV_HEADER_SIZE
-        self._accumulated_text = ""
+        self._chunk_index = 0
+        self._chunk_texts = []
+        self._current_chunk_text = ""
+        self._last_file_size = WAV_HEADER_SIZE
         self._stop_event.clear()
 
         # Live transcript file: same name as WAV but .live.txt
@@ -99,14 +122,23 @@ class RealtimeTranscriber:
             except OSError:
                 pass
 
-        # Release model memory
+        # Release model and GPU stream
+        self._stream = None
         self._model = None
 
+        accumulated = self._full_text()
         logger.info(
             "Realtime transcriber stopped. Accumulated %d chars",
-            len(self._accumulated_text),
+            len(accumulated),
         )
-        return self._accumulated_text
+        return accumulated
+
+    def _full_text(self) -> str:
+        """Combine finalized chunk texts with the current in-progress chunk."""
+        parts = self._chunk_texts[:]
+        if self._current_chunk_text:
+            parts.append(self._current_chunk_text)
+        return " ".join(parts)
 
     def _run(self) -> None:
         """Background loop: poll for new audio, transcribe periodically."""
@@ -127,42 +159,85 @@ class RealtimeTranscriber:
                 logger.error("Realtime transcription error: %s", e, exc_info=True)
 
     def _load_model(self) -> None:
-        """Load the parakeet-mlx model."""
+        """Load the parakeet-mlx model and create a reusable GPU stream."""
         if self._model is not None:
             return
-        logger.info("Loading Parakeet model for realtime transcription...")
+        import mlx.core as mx
         from parakeet_mlx import from_pretrained
-        from app.transcriber import PARAKEET_MODEL_ID
+        from app.transcriber import PARAKEET_MODEL_ID, MLX_MEMORY_LIMIT
+        # Cap GPU memory so we can't starve the system
+        mx.metal.set_memory_limit(MLX_MEMORY_LIMIT)
+        logger.info("Loading Parakeet model for realtime transcription...")
         self._model = from_pretrained(PARAKEET_MODEL_ID)
+        self._stream = mx.new_stream(mx.gpu)
         logger.info("Parakeet model loaded for realtime")
 
     def _transcribe_new_audio(self) -> None:
         """Read new bytes from the WAV file and transcribe if enough has accumulated."""
+        if self._transcribing:
+            logger.warning("Previous transcription cycle still running, skipping")
+            return
         if not self._wav_path or not os.path.exists(self._wav_path):
             return
 
-        file_size = os.path.getsize(self._wav_path)
-        new_bytes_available = file_size - self._bytes_read
+        self._transcribing = True
+        try:
+            self._do_transcribe()
+        finally:
+            self._transcribing = False
 
-        if new_bytes_available <= 0:
+    def _do_transcribe(self) -> None:
+        """Inner transcription logic using fixed chunks."""
+        file_size = os.path.getsize(self._wav_path)
+        total_pcm = file_size - WAV_HEADER_SIZE
+
+        if file_size <= self._last_file_size:
             return
 
-        # Check if we have enough new audio to bother transcribing
-        new_secs = new_bytes_available / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
+        # Check if enough new audio has arrived to bother transcribing
+        new_bytes = file_size - self._last_file_size
+        new_secs = new_bytes / BYTES_PER_SEC
         if new_secs < MIN_NEW_AUDIO_SECS:
             return
 
-        # Read all audio from the beginning (after header) for full context
-        # This gives Parakeet the complete audio, producing a coherent transcript
+        chunk_bytes = MAX_CHUNK_SECS * BYTES_PER_SEC
+
+        # Check if the recording has crossed into a new chunk.
+        # If so, finalize the current chunk's text before moving on.
+        current_chunk_end_byte = (self._chunk_index + 1) * chunk_bytes
+        if total_pcm > current_chunk_end_byte and self._current_chunk_text:
+            self._chunk_texts.append(self._current_chunk_text)
+            logger.info(
+                "Chunk %d finalized (%d chars). Starting chunk %d.",
+                self._chunk_index,
+                len(self._current_chunk_text),
+                self._chunk_index + 1,
+            )
+            self._current_chunk_text = ""
+            self._chunk_index += 1
+
+        # Determine byte range for the current chunk
+        chunk_start_byte = self._chunk_index * chunk_bytes
+        chunk_pcm_available = total_pcm - chunk_start_byte
+
+        if chunk_pcm_available <= 0:
+            return
+
+        # Read only the current chunk's audio
+        read_start = WAV_HEADER_SIZE + chunk_start_byte
+        read_end = WAV_HEADER_SIZE + min(
+            chunk_start_byte + chunk_bytes, total_pcm
+        )
+
         try:
             with open(self._wav_path, "rb") as f:
-                f.seek(WAV_HEADER_SIZE)
-                pcm_data = f.read(file_size - WAV_HEADER_SIZE)
+                f.seek(read_start)
+                pcm_data = f.read(read_end - read_start)
         except OSError as e:
             logger.warning("Could not read WAV file: %s", e)
             return
 
-        self._bytes_read = file_size
+        self._last_file_size = file_size
 
         if not pcm_data:
             return
@@ -179,31 +254,30 @@ class RealtimeTranscriber:
                 wf.setframerate(SAMPLE_RATE)
                 wf.writeframes(pcm_data)
 
-            # Transcribe the complete audio so far.
-            # Use a dedicated GPU stream to avoid Metal command buffer
-            # collisions with the main thread's AppKit run loop.
+            # Transcribe the current chunk.
             import mlx.core as mx
             from parakeet_mlx.parakeet import DecodingConfig, Beam
             from app.transcriber import PARAKEET_BEAM_SIZE
             decoding = DecodingConfig(decoding=Beam(beam_size=PARAKEET_BEAM_SIZE))
-            stream = mx.new_stream(mx.gpu)
             t0 = time.time()
-            with mx.stream(stream):
+            with mx.stream(self._stream):
                 result = self._model.transcribe(tmp_wav.name, decoding_config=decoding)
-            mx.synchronize(stream)
+            mx.synchronize(self._stream)
+            mx.metal.clear_cache()
             elapsed = time.time() - t0
 
             text = result.text.strip()
-            total_secs = len(pcm_data) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
+            chunk_secs = len(pcm_data) / BYTES_PER_SEC
 
             logger.info(
-                "Realtime transcription: %.0fs audio in %.1fs (%.1fx realtime)",
-                total_secs, elapsed, total_secs / max(elapsed, 0.01),
+                "Realtime transcription: chunk %d, %.0fs audio in %.1fs (%.1fx realtime)",
+                self._chunk_index, chunk_secs, elapsed,
+                chunk_secs / max(elapsed, 0.01),
             )
 
             if text:
-                self._accumulated_text = text
-                self._write_live_transcript(text)
+                self._current_chunk_text = text
+                self._write_live_transcript(self._full_text())
 
         except Exception as e:
             logger.error("Realtime Parakeet transcription failed: %s", e)
@@ -213,6 +287,8 @@ class RealtimeTranscriber:
                     os.unlink(tmp_wav.name)
                 except OSError:
                     pass
+            # Release pcm buffer
+            pcm_data = None  # noqa: F841
 
     def _write_live_transcript(self, text: str) -> None:
         """Update the .live.txt file with the current transcript."""

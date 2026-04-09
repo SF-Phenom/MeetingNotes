@@ -58,6 +58,10 @@ ICON_PENDING = "📝"
 ICON_TRANSCRIBING = "⏳"
 ICON_CHECKIN = "🔔"
 
+# Require N consecutive "no call detected" ticks before auto-stopping.
+# Each tick is 10 seconds, so 3 = 30 seconds of no detection.
+CALL_END_DEBOUNCE = 3
+
 _QUEUE_DIR = state_mod.QUEUE_DIR
 
 # ─── MeetingNotes App ─────────────────────────────────────────────────────────
@@ -78,6 +82,7 @@ class MeetingNotesApp(rumps.App):
         self._prompt_pending: bool = False  # guard against double-prompts
         self._transcribing: bool = False  # True while background transcription runs
         self._checkin_due: bool = False  # True when check-in threshold is reached
+        self._no_call_count: int = 0  # Consecutive "no call detected" ticks for debounce
 
         # Realtime transcription
         self._realtime_transcriber: RealtimeTranscriber | None = None
@@ -210,6 +215,11 @@ class MeetingNotesApp(rumps.App):
     @rumps.timer(10)
     def _call_detection_tick(self, _sender) -> None:
         """Poll for active calls every 10 seconds."""
+        # Call detection uses subprocess (fork+exec) for AppleScript.
+        # fork() while MLX GPU threads are active corrupts malloc locks,
+        # so skip detection entirely while transcription is running.
+        if self._transcribing:
+            return
         try:
             self._run_call_detection()
         except Exception as e:
@@ -246,24 +256,46 @@ class MeetingNotesApp(rumps.App):
 
     def _run_call_detection(self) -> None:
         currently_recording = recorder.is_recording()
+
+        # ── While recording: use lightweight process-alive check ──────
+        # The full detect_active_call() checks window titles and browser
+        # URLs, which fail during screenshare, minimized windows, etc.
+        # Once we're recording, we only care if the app is still running.
+        if currently_recording and self._last_detected_source is not None:
+            still_alive = call_detector.is_call_still_active(
+                self._last_detected_source
+            )
+            if still_alive:
+                self._no_call_count = 0
+            else:
+                self._no_call_count += 1
+                if self._no_call_count >= CALL_END_DEBOUNCE:
+                    logger.info(
+                        "Call app '%s' no longer running (%d consecutive misses), "
+                        "stopping recording",
+                        self._last_detected_source,
+                        self._no_call_count,
+                    )
+                    self._do_stop_recording(notify=True)
+                    self._no_call_count = 0
+                    self._last_detected_source = None
+                    self._skipped_session = None
+                else:
+                    logger.debug(
+                        "Call app not detected (%d/%d), waiting for debounce",
+                        self._no_call_count,
+                        CALL_END_DEBOUNCE,
+                    )
+            return
+
+        # ── Not recording: full detection for new calls ───────────────
         detected = call_detector.detect_active_call()
 
         if detected:
             source = detected["source"]
             url = detected.get("url")
             logger.debug("Call detected: source=%s url=%s", source, url)
-
-            # Update active call URL in state if recording
-            if currently_recording:
-                current_state = state_mod.load()
-                if url and current_state.get("active_call_url") != url:
-                    state_mod.update(active_call_url=url)
-
             self._last_detected_source = source
-
-            if currently_recording:
-                # Already recording — nothing more to do
-                return
 
             # Check suppression
             current_state = state_mod.load()
@@ -280,6 +312,12 @@ class MeetingNotesApp(rumps.App):
             if self._prompt_pending:
                 return
 
+            # Defer the dialog if realtime GPU transcription is active —
+            # NSAlert + background Metal ops cause assertion failures
+            if self._realtime_transcriber and self._realtime_transcriber.is_busy:
+                logger.debug("Deferring call prompt — GPU transcription in progress")
+                return
+
             self._prompt_pending = True
             try:
                 self._prompt_to_record(source, url)
@@ -287,14 +325,7 @@ class MeetingNotesApp(rumps.App):
                 self._prompt_pending = False
 
         else:
-            # No call detected
-            if currently_recording and self._last_detected_source is not None:
-                # We were recording an auto-detected call and it ended
-                logger.info(
-                    "Call ended for source '%s', stopping recording",
-                    self._last_detected_source,
-                )
-                self._do_stop_recording(notify=True)
+            # No call detected and not recording — reset state
             self._last_detected_source = None
             self._skipped_session = None
 

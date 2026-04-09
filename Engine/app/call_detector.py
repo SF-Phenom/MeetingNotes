@@ -51,7 +51,7 @@ NATIVE_APPS = [
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def _run_applescript(script: str, timeout: int = 3) -> str | None:
+def _run_applescript(script: str, timeout: int = 5) -> str | None:
     """Run an AppleScript snippet and return stdout, or None on failure."""
     try:
         result = subprocess.run(
@@ -99,6 +99,9 @@ def _check_chrome_urls() -> dict | None:
         'to get URL of every tab of every window'
     )
     output = _run_applescript(script)
+    if output is None:
+        # Retry once with longer timeout — system may be under GPU load
+        output = _run_applescript(script, timeout=8)
     if not output:
         return None
 
@@ -164,6 +167,36 @@ def _check_native_apps() -> dict | None:
                 return {"source": source, "url": None}
 
     return None
+
+
+# ─── Source → process name mapping (for lightweight alive check) ─────────────
+
+_SOURCE_TO_PROCESS: dict[str, str] = {
+    source: proc for proc, _kw, source in NATIVE_APPS
+}
+# Browser-based sources: the meeting runs inside Chrome
+_BROWSER_SOURCES = {"google-meet", "teams"}
+
+
+def is_call_still_active(source: str) -> bool:
+    """
+    Lightweight check: is the app for *source* still running?
+
+    Unlike detect_active_call(), this does NOT inspect window titles or
+    browser URLs.  It only checks whether the process is alive, which is
+    far more reliable while the user is screen-sharing or when AppleScript
+    is slow.  Use this when a recording is already in progress and you
+    just need to know if the call app is still open.
+    """
+    if source in _BROWSER_SOURCES:
+        return _process_running("Google Chrome")
+
+    proc_name = _SOURCE_TO_PROCESS.get(source)
+    if proc_name:
+        return _process_running(proc_name)
+
+    # Unknown source (e.g. "manual") — can't check, assume still active
+    return True
 
 
 # ─── Main detection function ──────────────────────────────────────────────────

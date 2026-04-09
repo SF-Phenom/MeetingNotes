@@ -178,8 +178,14 @@ def process_recording(
 
     # Step 3 & 4: Transcribe (or use pre-transcribed text from realtime mode)
     transcription = None
-    if pre_transcribed_text:
+    if pre_transcribed_text is not None:
         from .transcriber import TranscriptionResult
+        if not pre_transcribed_text:
+            logger.warning(
+                "Pre-transcribed text is empty — realtime transcriber produced "
+                "no output (recording may have been too short). Skipping pipeline."
+            )
+            return None
         logger.info("Using pre-transcribed text from realtime mode (%d chars)", len(pre_transcribed_text))
         transcription = TranscriptionResult(
             plain_text=pre_transcribed_text,
