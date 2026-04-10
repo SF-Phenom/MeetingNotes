@@ -180,6 +180,15 @@ _SOURCE_TO_TITLE: dict[str, str] = {
 # Browser-based sources: the meeting runs inside Chrome
 _BROWSER_SOURCES = {"google-meet", "teams"}
 
+# Apps where window COUNT is a better "in meeting" signal than title.
+# Zoom stays open after meetings end (1 window = home screen) and during
+# screenshare the meeting window disappears entirely, replaced by a
+# floating control bar that doesn't contain "Meeting" in its title.
+# But window count stays >= 2 throughout the meeting regardless of
+# screenshare state.
+_WINDOW_COUNT_SOURCES = {"zoom"}
+_WINDOW_COUNT_THRESHOLD = 2  # in-meeting = this many windows or more
+
 
 def is_call_still_active(source: str) -> bool:
     """
@@ -188,28 +197,55 @@ def is_call_still_active(source: str) -> bool:
     For browser-based sources (Google Meet, Teams): only checks if Chrome
     is running. Checking URLs is unreliable during screenshare/tab switching.
 
-    For native apps (Zoom, Slack, Webex, FaceTime): checks both process
-    AND window title. These apps stay running after a meeting ends, so
-    process-alive alone is not sufficient — the "Meeting" (or equivalent)
-    window disappears when the call is over.
+    For Zoom: checks process is running AND window count >= 2. Window titles
+    are unreliable because screensharing replaces the meeting window with a
+    floating control bar. Window count stays >= 2 throughout a meeting and
+    drops back to 1 (home screen) when the meeting ends.
+
+    For other native apps (Slack, Webex, FaceTime): checks process AND
+    window title keyword.
     """
     if source in _BROWSER_SOURCES:
         return _process_running("Google Chrome")
 
-    # Native apps: need window title check to distinguish
-    # "in a meeting" from "app open but meeting ended"
     proc_name = _SOURCE_TO_PROCESS.get(source)
-    title_keyword = _SOURCE_TO_TITLE.get(source)
-    if proc_name:
-        if not _process_running(proc_name):
-            return False
-        # Process is running — confirm meeting window is still present
-        if title_keyword:
-            return _has_meeting_window(proc_name, title_keyword)
+    if not proc_name:
+        # Unknown source (e.g. "manual") — can't check, assume still active
         return True
 
-    # Unknown source (e.g. "manual") — can't check, assume still active
+    if not _process_running(proc_name):
+        return False
+
+    # Process is running — use the right strategy per app
+    if source in _WINDOW_COUNT_SOURCES:
+        return _window_count(proc_name) >= _WINDOW_COUNT_THRESHOLD
+
+    title_keyword = _SOURCE_TO_TITLE.get(source)
+    if title_keyword:
+        return _has_meeting_window(proc_name, title_keyword)
+
     return True
+
+
+def _window_count(process_name: str) -> int:
+    """Return the number of windows for a given app process."""
+    script = (
+        'tell application "System Events"\n'
+        '    set appProc to first application process whose name is "{name}"\n'
+        '    return count of windows of appProc\n'
+        'end tell'
+    ).format(name=process_name)
+
+    output = _run_applescript(script)
+    if output is None:
+        # AppleScript failed — return high count to avoid false stop
+        return 99
+
+    try:
+        return int(output)
+    except ValueError:
+        logger.debug("Unexpected window count output for %s: %r", process_name, output)
+        return 99
 
 
 def _has_meeting_window(process_name: str, title_keyword: str) -> bool:
@@ -224,7 +260,6 @@ def _has_meeting_window(process_name: str, title_keyword: str) -> bool:
     output = _run_applescript(script)
     if output is None:
         # AppleScript failed — conservatively assume still in call
-        # (better to keep recording than to stop prematurely)
         return True
 
     window_names = [w.strip() for w in output.split(",")]
