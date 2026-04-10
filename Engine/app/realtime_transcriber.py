@@ -21,7 +21,9 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 import os
+import struct
 import tempfile
 import threading
 import time
@@ -45,6 +47,10 @@ SAMPLE_WIDTH = 2  # 16-bit
 CHANNELS = 1
 WAV_HEADER_SIZE = 44
 BYTES_PER_SEC = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
+
+# Audio below this RMS dBFS threshold is effectively silence.
+# Normal speech is -20 to -6 dBFS; -50 dBFS is extremely quiet.
+SILENCE_THRESHOLD_DBFS = -50
 
 
 class RealtimeTranscriber:
@@ -135,7 +141,7 @@ class RealtimeTranscriber:
 
     def _full_text(self) -> str:
         """Combine finalized chunk texts with the current in-progress chunk."""
-        parts = self._chunk_texts[:]
+        parts = [t for t in self._chunk_texts if t]
         if self._current_chunk_text:
             parts.append(self._current_chunk_text)
         return " ".join(parts)
@@ -203,9 +209,10 @@ class RealtimeTranscriber:
         chunk_bytes = MAX_CHUNK_SECS * BYTES_PER_SEC
 
         # Check if the recording has crossed into a new chunk.
-        # If so, finalize the current chunk's text before moving on.
+        # Advance based on byte position — even if Parakeet produced no text
+        # for the current chunk, we must still move forward.
         current_chunk_end_byte = (self._chunk_index + 1) * chunk_bytes
-        if total_pcm > current_chunk_end_byte and self._current_chunk_text:
+        while total_pcm > current_chunk_end_byte:
             self._chunk_texts.append(self._current_chunk_text)
             logger.info(
                 "Chunk %d finalized (%d chars). Starting chunk %d.",
@@ -215,6 +222,7 @@ class RealtimeTranscriber:
             )
             self._current_chunk_text = ""
             self._chunk_index += 1
+            current_chunk_end_byte = (self._chunk_index + 1) * chunk_bytes
 
         # Determine byte range for the current chunk
         chunk_start_byte = self._chunk_index * chunk_bytes
@@ -241,6 +249,23 @@ class RealtimeTranscriber:
 
         if not pcm_data:
             return
+
+        # Check audio level — warn early if recording is near-silence
+        try:
+            n_samples = len(pcm_data) // SAMPLE_WIDTH
+            if n_samples > 0:
+                samples = struct.unpack(f"<{n_samples}h", pcm_data[:n_samples * SAMPLE_WIDTH])
+                rms = math.sqrt(sum(s * s for s in samples) / n_samples)
+                db_rms = 20 * math.log10(rms / 32768) if rms > 0 else -100
+                if db_rms < SILENCE_THRESHOLD_DBFS:
+                    logger.warning(
+                        "Audio level very low (%.1f dBFS) — mic may not be "
+                        "capturing speech. Check that the correct input device "
+                        "is selected.",
+                        db_rms,
+                    )
+        except Exception:
+            pass  # Audio check is best-effort, don't block transcription
 
         # Write PCM data to a temporary WAV file for Parakeet
         tmp_wav = None
