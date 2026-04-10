@@ -15,6 +15,7 @@ import os
 import signal
 import logging
 import subprocess
+import threading
 from datetime import datetime
 
 from . import state as state_mod
@@ -82,6 +83,19 @@ def start_recording(source: str) -> str:
         active_call_source=source,
     )
 
+    # Monitor stderr in a background thread so capture warnings (e.g.
+    # "System audio capture unavailable") appear in the log immediately.
+    def _drain_stderr(proc):
+        try:
+            for raw_line in proc.stderr:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if line:
+                    logger.warning("capture-audio: %s", line)
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain_stderr, args=(_process,), daemon=True).start()
+
     logger.info("Recording started (pid=%d) for source '%s'", _process.pid, source)
     return recording_path
 
@@ -131,6 +145,16 @@ def stop_recording() -> str | None:
     except OSError as e:
         logger.error("Error stopping capture-audio: %s", e)
     finally:
+        # Log any stderr output from the capture binary (warnings about
+        # system audio capture failures, device errors, etc.)
+        if _process is not None:
+            try:
+                _, stderr_data = _process.communicate(timeout=1)
+                if stderr_data:
+                    for line in stderr_data.decode("utf-8", errors="replace").strip().splitlines():
+                        logger.warning("capture-audio stderr: %s", line)
+            except Exception:
+                pass
         _process = None
 
     # Remove lock file
