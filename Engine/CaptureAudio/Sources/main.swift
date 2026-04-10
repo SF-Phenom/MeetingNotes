@@ -20,7 +20,7 @@ let outputPath = args[3]
 // MARK: - Paths
 
 let lockDir = (NSHomeDirectory() as NSString)
-    .appendingPathComponent("MeetingNotes/Engine/recordings/active")
+    .appendingPathComponent("MeetingNotes_RT/Engine/recordings/active")
 let lockPath = (lockDir as NSString).appendingPathComponent(".lock")
 
 // MARK: - WAV Writer

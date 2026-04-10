@@ -1,18 +1,16 @@
 import AVFoundation
-@preconcurrency import CoreAudio
-import AudioToolbox
+import CoreAudio
 import Foundation
+import ScreenCaptureKit
 
 // MARK: - AudioCaptureManager
 
-final class AudioCaptureManager: @unchecked Sendable {
+final class AudioCaptureManager: NSObject, @unchecked Sendable {
 
     private let wavWriter: WAVWriter
-    private var systemEngine: AVAudioEngine?
     private var micEngine: AVAudioEngine?
-
-    private var tapID: AudioObjectID = kAudioObjectUnknown
-    private var aggregateDeviceID: AudioObjectID = kAudioObjectUnknown
+    private var scStream: SCStream?
+    private var streamDelegate: SystemAudioDelegate?
 
     // Output format: 16kHz mono 16-bit PCM
     private let outputFormat = AVAudioFormat(
@@ -25,105 +23,202 @@ final class AudioCaptureManager: @unchecked Sendable {
     // Serialises writes from both tap callbacks
     private let writeLock = NSLock()
 
+    // Track whether system audio is delivering data (for diagnostics)
+    private var systemAudioFrameCount: Int = 0
+
     init(wavWriter: WAVWriter) {
         self.wavWriter = wavWriter
+        super.init()
     }
 
     // MARK: - Public API
 
     func start() throws {
         try startMicCapture()
-        if #available(macOS 14.2, *) {
-            do {
-                try startSystemAudioCapture()
-            } catch {
-                fputs("Warning: System audio capture unavailable: \(error)\n", stderr)
-            }
-        } else {
-            fputs("Warning: System audio capture requires macOS 14.2+\n", stderr)
-        }
+        startSystemAudioCapture()
     }
 
     func stop() {
-        systemEngine?.stop()
         micEngine?.stop()
-        teardownSystemAudio()
+        micEngine = nil
+
+        if let stream = scStream {
+            // SCStream.stop is async; fire and forget during shutdown
+            let semaphore = DispatchSemaphore(value: 0)
+            stream.stopCapture { error in
+                if let error {
+                    fputs("Warning: SCStream stop error: \(error)\n", stderr)
+                }
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 3)
+            scStream = nil
+        }
+
+        fputs("CaptureAudio: system audio delivered \(systemAudioFrameCount) frames total\n", stderr)
     }
 
-    // MARK: - System Audio via CATapDescription + Aggregate Device
+    // MARK: - System Audio via ScreenCaptureKit
 
-    @available(macOS 14.2, *)
-    private func startSystemAudioCapture() throws {
-        // 1. Create a global mono tap (captures all processes)
-        let tapDesc = CATapDescription()
-        tapDesc.isMono = true
-        tapDesc.isExclusive = true   // exclude ourselves
+    private func startSystemAudioCapture() {
+        // ScreenCaptureKit setup is async — run on a background queue
+        // but block briefly so we know if it worked before returning
+        let semaphore = DispatchSemaphore(value: 0)
+        var captureError: Error?
 
-        var tapIDOut: AudioObjectID = kAudioObjectUnknown
-        let tapStatus = AudioHardwareCreateProcessTap(tapDesc, &tapIDOut)
-        guard tapStatus == kAudioHardwareNoError else {
-            throw CaptureError.tapCreationFailed(tapStatus)
+        Task {
+            do {
+                try await self._setupScreenCaptureKit()
+            } catch {
+                captureError = error
+            }
+            semaphore.signal()
         }
-        tapID = tapIDOut
 
-        // 2. Get the tap's UID string (needed for the aggregate device description)
-        let tapUID = try getStringProperty(
-            objectID: tapID,
-            selector: kAudioTapPropertyUID,
-            scope: kAudioObjectPropertyScopeGlobal
+        // Wait up to 5 seconds for setup
+        let result = semaphore.wait(timeout: .now() + 5)
+        if result == .timedOut {
+            fputs("Warning: ScreenCaptureKit setup timed out\n", stderr)
+        } else if let err = captureError {
+            fputs("Warning: System audio capture unavailable: \(err)\n", stderr)
+        }
+    }
+
+    @available(macOS 13.0, *)
+    private func _setupScreenCaptureKit() async throws {
+        // 1. Get shareable content (displays, apps, windows)
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false
         )
 
-        // 3. Create an aggregate device that includes the tap
-        let aggUID = UUID().uuidString
-        let aggDesc: [String: Any] = [
-            kAudioAggregateDeviceUIDKey: aggUID,
-            kAudioAggregateDeviceNameKey: "CaptureAudioAgg",
-            kAudioAggregateDeviceIsPrivateKey: 1,
-            kAudioAggregateDeviceTapListKey: [
-                [kAudioSubTapUIDKey: tapUID]
-            ],
-            kAudioAggregateDeviceTapAutoStartKey: 1
-        ]
-
-        var aggDeviceIDOut: AudioObjectID = kAudioObjectUnknown
-        let aggStatus = AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &aggDeviceIDOut)
-        guard aggStatus == kAudioHardwareNoError else {
-            AudioHardwareDestroyProcessTap(tapID)
-            tapID = kAudioObjectUnknown
-            throw CaptureError.aggregateDeviceCreationFailed(aggStatus)
-        }
-        aggregateDeviceID = aggDeviceIDOut
-
-        // 4. Stand up AVAudioEngine pointed at the aggregate device
-        let engine = AVAudioEngine()
-        systemEngine = engine
-        try setEngineInputDevice(engine: engine, deviceID: aggregateDeviceID)
-
-        let inputNode = engine.inputNode
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-        guard let converter = AVAudioConverter(from: hwFormat, to: outputFormat) else {
-            throw CaptureError.converterCreationFailed
+        guard let display = content.displays.first else {
+            throw CaptureError.noDisplay
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            self.convertAndWrite(buffer: buffer, converter: converter)
+        // 2. Exclude our own process from the capture
+        let selfBundleID = Bundle.main.bundleIdentifier ?? ""
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        let excludedApps = content.applications.filter { app in
+            app.bundleIdentifier == selfBundleID || app.processID == selfPID
         }
 
-        try engine.start()
+        // 3. Create a content filter — capture the whole display minus our app
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: excludedApps,
+            exceptingWindows: []
+        )
+
+        // 4. Configure the stream for audio only
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.excludesCurrentProcessAudio = true
+        config.sampleRate = 16000          // match our WAV format
+        config.channelCount = 1            // mono
+
+        // We don't need video — set minimal video parameters
+        config.width = 2
+        config.height = 2
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1 fps minimum
+
+        // 5. Create the stream with our audio delegate
+        let delegate = SystemAudioDelegate(manager: self)
+        self.streamDelegate = delegate
+
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        self.scStream = stream
+
+        // Add output for audio samples
+        try stream.addStreamOutput(
+            delegate,
+            type: .audio,
+            sampleHandlerQueue: DispatchQueue(label: "com.meetingnotes.systemaudio", qos: .userInteractive)
+        )
+
+        // 6. Start capturing
+        try await stream.startCapture()
+        fputs("CaptureAudio: ScreenCaptureKit system audio capture started\n", stderr)
     }
 
-    private func teardownSystemAudio() {
-        if aggregateDeviceID != kAudioObjectUnknown {
-            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-            aggregateDeviceID = kAudioObjectUnknown
+    // Called by SystemAudioDelegate when audio samples arrive
+    fileprivate func handleSystemAudioSample(_ sampleBuffer: CMSampleBuffer) {
+        guard let formatDesc = sampleBuffer.formatDescription,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            return
         }
-        if tapID != kAudioObjectUnknown {
-            if #available(macOS 14.2, *) {
-                AudioHardwareDestroyProcessTap(tapID)
+
+        // Get the raw audio data
+        guard let blockBuffer = sampleBuffer.dataBuffer else { return }
+
+        let length = CMBlockBufferGetDataLength(blockBuffer)
+        guard length > 0 else { return }
+
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        var lengthOut: Int = 0
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+            totalLengthOut: &lengthOut, dataPointerOut: &dataPointer
+        )
+        guard status == kCMBlockBufferNoErr, let ptr = dataPointer, lengthOut > 0 else {
+            return
+        }
+
+        let rawData = Data(bytes: ptr, count: lengthOut)
+
+        // The SCStream is configured for 16kHz mono, but the actual format
+        // may differ. Convert if needed.
+        let srcSampleRate = asbd.pointee.mSampleRate
+        let srcChannels = asbd.pointee.mChannelsPerFrame
+        let srcBitsPerChannel = asbd.pointee.mBitsPerChannel
+        let srcIsFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+
+        // If format already matches our output (16kHz, mono, 16-bit int), write directly
+        if Int(srcSampleRate) == 16000 && srcChannels == 1 &&
+           srcBitsPerChannel == 16 && !srcIsFloat {
+            writeLock.lock()
+            wavWriter.write(rawData)
+            writeLock.unlock()
+            systemAudioFrameCount += lengthOut / 2
+            return
+        }
+
+        // Otherwise, use AVAudioConverter for format conversion
+        guard let srcFormat = AVAudioFormat(
+            commonFormat: srcIsFloat ? .pcmFormatFloat32 : .pcmFormatInt16,
+            sampleRate: srcSampleRate,
+            channels: AVAudioChannelCount(srcChannels),
+            interleaved: true
+        ) else { return }
+
+        guard let converter = AVAudioConverter(from: srcFormat, to: outputFormat) else { return }
+
+        let frameCount = UInt32(lengthOut) / srcFormat.streamDescription.pointee.mBytesPerFrame
+        guard frameCount > 0 else { return }
+
+        guard let srcBuffer = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
+            return
+        }
+        srcBuffer.frameLength = frameCount
+
+        // Copy raw data into the source buffer
+        if srcIsFloat, let floatData = srcBuffer.floatChannelData {
+            rawData.withUnsafeBytes { rawBuf in
+                if let baseAddr = rawBuf.baseAddress {
+                    memcpy(floatData[0], baseAddr, lengthOut)
+                }
             }
-            tapID = kAudioObjectUnknown
+        } else if let int16Data = srcBuffer.int16ChannelData {
+            rawData.withUnsafeBytes { rawBuf in
+                if let baseAddr = rawBuf.baseAddress {
+                    memcpy(int16Data[0], baseAddr, lengthOut)
+                }
+            }
+        } else {
+            return
         }
+
+        convertAndWrite(buffer: srcBuffer, converter: converter)
+        systemAudioFrameCount += Int(frameCount)
     }
 
     // MARK: - Microphone Capture
@@ -147,26 +242,6 @@ final class AudioCaptureManager: @unchecked Sendable {
         try engine.start()
     }
 
-    // MARK: - AudioUnit device routing
-
-    private func setEngineInputDevice(engine: AVAudioEngine, deviceID: AudioDeviceID) throws {
-        guard let auhal = engine.inputNode.audioUnit else {
-            throw CaptureError.noAudioUnit
-        }
-        var devID = deviceID
-        let result = AudioUnitSetProperty(
-            auhal,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &devID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard result == noErr else {
-            throw CaptureError.audioUnitPropertyFailed(result)
-        }
-    }
-
     // MARK: - Conversion and Writing
 
     private func convertAndWrite(buffer: AVAudioPCMBuffer, converter: AVAudioConverter) {
@@ -176,9 +251,6 @@ final class AudioCaptureManager: @unchecked Sendable {
         guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat,
                                                    frameCapacity: outFrameCapacity) else { return }
 
-        // The converter input block is called once per conversion call.
-        // We use nonisolated(unsafe) to satisfy Swift 6 sendability rules
-        // for the local `consumed` flag captured across the @Sendable boundary.
         nonisolated(unsafe) var consumed = false
         nonisolated(unsafe) let inputBuffer = buffer
 
@@ -204,38 +276,34 @@ final class AudioCaptureManager: @unchecked Sendable {
         wavWriter.write(data)
         writeLock.unlock()
     }
+}
 
-    // MARK: - CoreAudio Helpers
+// MARK: - ScreenCaptureKit Audio Delegate
 
-    private func getStringProperty(
-        objectID: AudioObjectID,
-        selector: AudioObjectPropertySelector,
-        scope: AudioObjectPropertyScope
-    ) throws -> String {
-        var address = AudioObjectPropertyAddress(
-            mSelector: selector,
-            mScope: scope,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        // AudioObjectGetPropertyData returns a retained CFString for string properties.
-        // We receive it via an Unmanaged<CFString> to avoid the incorrect UnsafeMutableRawPointer warning.
-        var unmanagedStr: Unmanaged<CFString>? = nil
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &unmanagedStr)
-        guard status == kAudioHardwareNoError, let unmanaged = unmanagedStr else {
-            throw CaptureError.propertyReadFailed(status)
-        }
-        return unmanaged.takeRetainedValue() as String
+private class SystemAudioDelegate: NSObject, SCStreamOutput {
+    private weak var manager: AudioCaptureManager?
+
+    init(manager: AudioCaptureManager) {
+        self.manager = manager
+        super.init()
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio else { return }
+        manager?.handleSystemAudioSample(sampleBuffer)
     }
 }
 
 // MARK: - Errors
 
-enum CaptureError: Error {
-    case tapCreationFailed(OSStatus)
-    case aggregateDeviceCreationFailed(OSStatus)
+enum CaptureError: Error, CustomStringConvertible {
+    case noDisplay
     case converterCreationFailed
-    case noAudioUnit
-    case audioUnitPropertyFailed(OSStatus)
-    case propertyReadFailed(OSStatus)
+
+    var description: String {
+        switch self {
+        case .noDisplay: return "No display found for ScreenCaptureKit"
+        case .converterCreationFailed: return "Failed to create audio converter"
+        }
+    }
 }

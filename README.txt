@@ -80,14 +80,20 @@ OTHER FILES
 PERMISSIONS
 -----------
 
-On first launch, macOS will ask for three permissions:
+On first launch, macOS will ask for several permissions:
 
-  Microphone       Required to capture meeting audio.
-  Accessibility    Required to detect active calls (Zoom, Meet, etc).
-  Notifications    Optional, for transcription-complete alerts.
+  Microphone              Required to capture your side of calls.
+  Screen Recording /      Required to capture system audio (the other
+  System Audio Recording  side of calls) via ScreenCaptureKit.
+  Accessibility           Required to detect active calls (Zoom, Meet, etc).
+  Notifications           Optional, for transcription-complete alerts.
 
 Grant these when prompted. If you accidentally deny one, go to
 System Settings > Privacy & Security to re-enable it.
+
+Note: Without the Screen Recording / System Audio Recording
+permission, only your microphone is captured -- you won't hear
+the other participants in the transcript.
 
 
 TROUBLESHOOTING

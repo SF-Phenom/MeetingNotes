@@ -377,7 +377,7 @@ else
     swift build -c release --scratch-path "$build_tmp" 2>&1 | tail -5 || true
 
     if [[ ! -f "$build_tmp/release/CaptureAudio" ]]; then
-        fail "Swift build failed. Ensure macOS 14.2+ and Xcode CLI tools are installed."
+        fail "Swift build failed. Ensure macOS 14+ and Xcode CLI tools are installed."
     fi
 
     mkdir -p "$ENGINE_DIR/.bin"
@@ -626,6 +626,6 @@ echo "    Open Obsidian → 'Open folder as vault' → $BASE_DIR/transcripts"
 echo ""
 echo "  ${BOLD}First time?${RESET}"
 echo "    Edit ${BLUE}$BASE_DIR/Settings/context.md${RESET} with your role, team, and meeting info."
-echo "    macOS will prompt for Microphone, Accessibility, and Notification"
-echo "    permissions on first use."
+echo "    macOS will prompt for Microphone, Screen Recording (system audio),"
+echo "    Accessibility, and Notification permissions on first use."
 echo ""

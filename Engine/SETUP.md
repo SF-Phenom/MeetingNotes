@@ -275,10 +275,13 @@ The app needs several permissions. macOS will prompt you the first time each is 
 | Permission | Why | When prompted |
 |---|---|---|
 | **Microphone** | Record your side of calls | First recording start |
+| **Screen Recording** or **System Audio Recording** | Capture meeting audio from Zoom, Meet, etc. via ScreenCaptureKit | First recording start |
 | **Accessibility** | Read window titles for call detection | First app launch |
 | **Notifications** | Show recording/transcription alerts | First app launch |
 
 **To manage later:** System Settings → Privacy & Security → [category]
+
+> **Note:** The "Screen Recording" permission is required for system audio capture. On macOS 15+, this may appear as "System Audio Recording Only" under Privacy & Security. Grant it to Terminal (or whichever app launches MeetingNotes). Without this permission, only your microphone will be captured — you won't hear the other side of calls in the transcript.
 
 ---
 
@@ -325,9 +328,9 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 **Menu bar icon doesn't appear:** Make sure your virtual environment is activated (`source Engine/.venv/bin/activate`) and rumps is installed (`pip list | grep rumps`).
 
-**No audio in recording:** Check System Settings → Sound → Input. System audio capture requires no configuration.
+**No audio in recording:** Check System Settings → Sound → Input. System audio capture requires the "Screen Recording" (or "System Audio Recording") permission — go to System Settings → Privacy & Security and ensure Terminal is enabled.
 
-**Swift binary won't compile:** Ensure Xcode Command Line Tools are installed. Requires macOS 14.2+.
+**Swift binary won't compile:** Ensure Xcode Command Line Tools are installed. Requires macOS 14+.
 
 **Transcription fails with "whisper-cli not found":** Build whisper.cpp per step 6. Binary should be at `~/whisper.cpp/build/bin/whisper-cli`.
 
