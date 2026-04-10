@@ -53,6 +53,7 @@ BYTES_PER_SEC = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
 SILENCE_THRESHOLD_DBFS = -50
 
 
+
 class RealtimeTranscriber:
     """Reads a growing WAV file and produces live partial transcripts."""
 

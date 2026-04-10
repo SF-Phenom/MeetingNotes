@@ -25,6 +25,8 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
 
     // Track whether system audio is delivering data (for diagnostics)
     private var systemAudioFrameCount: Int = 0
+    private var systemAudioFormatLogged: Bool = false
+    private var systemAudioCallbackCount: Int = 0
 
     init(wavWriter: WAVWriter) {
         self.wavWriter = wavWriter
@@ -55,7 +57,7 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
             scStream = nil
         }
 
-        fputs("CaptureAudio: system audio delivered \(systemAudioFrameCount) frames total\n", stderr)
+        fputs("CaptureAudio: system audio delivered \(systemAudioFrameCount) frames in \(systemAudioCallbackCount) callbacks\n", stderr)
     }
 
     // MARK: - System Audio via ScreenCaptureKit
@@ -113,8 +115,13 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.excludesCurrentProcessAudio = true
-        config.sampleRate = 16000          // match our WAV format
-        config.channelCount = 1            // mono
+        // Capture at the system's native 48 kHz stereo.  Requesting a
+        // non-native rate (e.g. 16 kHz) forces ScreenCaptureKit's internal
+        // resampler, which can silently drop audio from apps that use
+        // Voice Processing IO (Zoom, FaceTime, etc.).  We downsample to
+        // 16 kHz mono ourselves via AVAudioConverter.
+        config.sampleRate = 48000
+        config.channelCount = 2
 
         // We don't need video — set minimal video parameters
         config.width = 2
@@ -146,6 +153,18 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
             return
         }
+
+        // Log the audio format once so we can diagnose capture issues
+        if !systemAudioFormatLogged {
+            let sr = asbd.pointee.mSampleRate
+            let ch = asbd.pointee.mChannelsPerFrame
+            let bpc = asbd.pointee.mBitsPerChannel
+            let isFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+            fputs("CaptureAudio: system audio format: \(sr) Hz, \(ch) ch, \(bpc)-bit \(isFloat ? "float" : "int")\n", stderr)
+            systemAudioFormatLogged = true
+        }
+
+        systemAudioCallbackCount += 1
 
         // Get the raw audio data
         guard let blockBuffer = sampleBuffer.dataBuffer else { return }
