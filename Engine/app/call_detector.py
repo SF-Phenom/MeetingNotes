@@ -174,29 +174,64 @@ def _check_native_apps() -> dict | None:
 _SOURCE_TO_PROCESS: dict[str, str] = {
     source: proc for proc, _kw, source in NATIVE_APPS
 }
+_SOURCE_TO_TITLE: dict[str, str] = {
+    source: kw for _proc, kw, source in NATIVE_APPS
+}
 # Browser-based sources: the meeting runs inside Chrome
 _BROWSER_SOURCES = {"google-meet", "teams"}
 
 
 def is_call_still_active(source: str) -> bool:
     """
-    Lightweight check: is the app for *source* still running?
+    Check whether the call for *source* is still in progress.
 
-    Unlike detect_active_call(), this does NOT inspect window titles or
-    browser URLs.  It only checks whether the process is alive, which is
-    far more reliable while the user is screen-sharing or when AppleScript
-    is slow.  Use this when a recording is already in progress and you
-    just need to know if the call app is still open.
+    For browser-based sources (Google Meet, Teams): only checks if Chrome
+    is running. Checking URLs is unreliable during screenshare/tab switching.
+
+    For native apps (Zoom, Slack, Webex, FaceTime): checks both process
+    AND window title. These apps stay running after a meeting ends, so
+    process-alive alone is not sufficient — the "Meeting" (or equivalent)
+    window disappears when the call is over.
     """
     if source in _BROWSER_SOURCES:
         return _process_running("Google Chrome")
 
+    # Native apps: need window title check to distinguish
+    # "in a meeting" from "app open but meeting ended"
     proc_name = _SOURCE_TO_PROCESS.get(source)
+    title_keyword = _SOURCE_TO_TITLE.get(source)
     if proc_name:
-        return _process_running(proc_name)
+        if not _process_running(proc_name):
+            return False
+        # Process is running — confirm meeting window is still present
+        if title_keyword:
+            return _has_meeting_window(proc_name, title_keyword)
+        return True
 
     # Unknown source (e.g. "manual") — can't check, assume still active
     return True
+
+
+def _has_meeting_window(process_name: str, title_keyword: str) -> bool:
+    """Check if an app has a window whose title contains the keyword."""
+    script = (
+        'tell application "System Events"\n'
+        '    set appProc to first application process whose name is "{name}"\n'
+        '    set winNames to name of every window of appProc\n'
+        'end tell'
+    ).format(name=process_name)
+
+    output = _run_applescript(script)
+    if output is None:
+        # AppleScript failed — conservatively assume still in call
+        # (better to keep recording than to stop prematurely)
+        return True
+
+    window_names = [w.strip() for w in output.split(",")]
+    for wname in window_names:
+        if title_keyword.lower() in wname.lower():
+            return True
+    return False
 
 
 # ─── Main detection function ──────────────────────────────────────────────────
