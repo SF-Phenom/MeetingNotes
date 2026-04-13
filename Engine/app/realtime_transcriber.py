@@ -142,10 +142,11 @@ class RealtimeTranscriber:
 
     def _full_text(self) -> str:
         """Combine finalized chunk texts with the current in-progress chunk."""
+        from app.corrections import apply_corrections
         parts = [t for t in self._chunk_texts if t]
         if self._current_chunk_text:
             parts.append(self._current_chunk_text)
-        return " ".join(parts)
+        return apply_corrections(" ".join(parts))
 
     def _run(self) -> None:
         """Background loop: poll for new audio, transcribe periodically."""
