@@ -13,7 +13,6 @@ state.json schema:
   "active_recording_path": str|null,
   "active_call_url": str|null,
   "active_call_source": str|null,
-  "transcription_mode": str       # "live" | "batch"
 }
 """
 
@@ -45,7 +44,6 @@ DEFAULT_STATE = {
     "active_recording_path": None,
     "active_call_url": None,
     "active_call_source": None,
-    "transcription_mode": "live",       # "live" (parakeet) | "batch" (whisper)
 }
 
 

@@ -9,9 +9,6 @@ set -euo pipefail
 
 # -- Constants ------------------------------------------------
 BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes_RT}"
-WHISPER_DIR="$HOME/whisper.cpp"
-WHISPER_BINARY="$WHISPER_DIR/build/bin/whisper-cli"
-WHISPER_MODEL="$WHISPER_DIR/models/ggml-large-v3-turbo.bin"
 ENGINE_DIR="$BASE_DIR/Engine"
 CAPTURE_BINARY="$ENGINE_DIR/.bin/capture-audio"
 VENV_DIR="$ENGINE_DIR/.venv"
@@ -79,12 +76,12 @@ echo "  ${BOLD}What gets installed:${RESET}"
 echo ""
 echo "  ${BLUE}Dependencies${RESET}"
 echo "    Homebrew (macOS package manager)"
-echo "    Python 3.12, ffmpeg, cmake"
+echo "    Python 3.12, ffmpeg"
 echo ""
 echo "  ${BLUE}Transcription engine${RESET}"
-echo "    whisper.cpp — runs speech-to-text locally on your Mac"
-echo "    using GPU acceleration. Audio never leaves your machine."
-echo "    Includes a ~1.5GB language model download."
+echo "    Parakeet — runs speech-to-text locally on your Mac"
+echo "    using GPU acceleration via MLX. Audio never leaves your"
+echo "    machine. Includes a ~2.5GB model download."
 echo ""
 echo "  ${BLUE}Summarization${RESET}"
 echo "    Claude API — sends transcript text (never audio) to"
@@ -116,7 +113,7 @@ fi
 
 # Apple Silicon
 if [[ "$(uname -m)" != "arm64" ]]; then
-    fail "MeetingNotes requires Apple Silicon (M1/M2/M3/M4) for whisper.cpp Metal GPU acceleration. Detected: $(uname -m)"
+    fail "MeetingNotes requires Apple Silicon (M1/M2/M3/M4) for Metal GPU acceleration. Detected: $(uname -m)"
 fi
 
 # Repo presence (will be cloned in step 1 if missing)
@@ -133,7 +130,7 @@ fi
 # Disk space warning
 available_gb=$(df -g "$HOME" | awk 'NR==2 {print $4}')
 if [[ "$available_gb" -lt 5 ]]; then
-    warn "Low disk space: ${available_gb}GB available. Setup needs ~3GB (whisper model + builds)."
+    warn "Low disk space: ${available_gb}GB available. Setup needs ~3GB (Parakeet model + builds)."
     if ! confirm "Continue anyway?"; then
         exit 0
     fi
@@ -241,17 +238,16 @@ else
 fi
 
 # ============================================================
-# STEP 4: Brew Packages (Python 3.12, ffmpeg, cmake)
+# STEP 4: Brew Packages (Python 3.12, ffmpeg)
 # ============================================================
-step 4 "Brew packages (Python 3.12, ffmpeg, cmake)"
+step 4 "Brew packages (Python 3.12, ffmpeg)"
 
 missing_pkgs=()
 if ! command -v python3.12 &>/dev/null; then missing_pkgs+=(python@3.12); fi
 if ! command -v ffmpeg &>/dev/null;     then missing_pkgs+=(ffmpeg); fi
-if ! command -v cmake &>/dev/null;      then missing_pkgs+=(cmake); fi
 
 if [[ ${#missing_pkgs[@]} -eq 0 ]]; then
-    already "python3.12, ffmpeg, cmake"
+    already "python3.12, ffmpeg"
 else
     info "Installing: ${missing_pkgs[*]}..."
     brew install "${missing_pkgs[@]}"
@@ -307,65 +303,9 @@ else
 fi
 
 # ============================================================
-# STEP 6: whisper.cpp (clone + build + model)
+# STEP 6: Swift Audio Capture Binary
 # ============================================================
-step 6 "whisper.cpp (speech-to-text engine)"
-
-# 5a: Clone
-if [[ -d "$WHISPER_DIR/.git" ]]; then
-    already "whisper.cpp repo"
-else
-    info "Cloning whisper.cpp..."
-    git clone https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
-    success "whisper.cpp cloned"
-fi
-
-# 5b: Build
-if [[ -x "$WHISPER_BINARY" ]]; then
-    already "whisper-cli binary"
-else
-    info "Building whisper.cpp with Metal GPU acceleration..."
-    info "This may take a few minutes."
-    cd "$WHISPER_DIR"
-    cmake -B build -DWHISPER_METAL=ON 2>&1 | tail -5
-    cmake --build build --config Release 2>&1 | tail -5
-    cd "$BASE_DIR"
-
-    if [[ ! -x "$WHISPER_BINARY" ]]; then
-        fail "whisper.cpp build failed. Check the output above."
-    fi
-    success "whisper-cli built"
-fi
-
-# 5c: Model
-model_size=0
-if [[ -f "$WHISPER_MODEL" ]]; then
-    model_size=$(stat -f%z "$WHISPER_MODEL" 2>/dev/null || echo 0)
-fi
-
-if [[ $model_size -gt 1000000000 ]]; then
-    already "whisper model (large-v3-turbo)"
-else
-    if [[ $model_size -gt 0 ]]; then
-        warn "Partial model download detected. Re-downloading."
-    fi
-    info "Downloading whisper model (large-v3-turbo, ~1.5GB)..."
-    info "This is the longest step — grab a coffee."
-    cd "$WHISPER_DIR"
-    ./models/download-ggml-model.sh large-v3-turbo
-    cd "$BASE_DIR"
-
-    new_size=$(stat -f%z "$WHISPER_MODEL" 2>/dev/null || echo 0)
-    if [[ $new_size -lt 1000000000 ]]; then
-        fail "Model download appears incomplete (${new_size} bytes). Check your connection and re-run."
-    fi
-    success "whisper model downloaded"
-fi
-
-# ============================================================
-# STEP 7: Swift Audio Capture Binary
-# ============================================================
-step 7 "Swift audio capture binary"
+step 6 "Swift audio capture binary"
 
 if [[ -x "$CAPTURE_BINARY" ]]; then
     already "capture-audio binary"
@@ -388,9 +328,9 @@ else
 fi
 
 # ============================================================
-# STEP 8: Directory Structure
+# STEP 7: Directory Structure
 # ============================================================
-step 8 "Directory structure"
+step 7 "Directory structure"
 
 mkdir -p "$ENGINE_DIR/recordings/active"
 mkdir -p "$ENGINE_DIR/recordings/queue"
@@ -403,9 +343,9 @@ mkdir -p "$ENGINE_DIR/.credentials"
 success "Directories ready"
 
 # ============================================================
-# STEP 9: state.json
+# STEP 8: state.json
 # ============================================================
-step 9 "state.json"
+step 8 "state.json"
 
 if [[ -f "$ENGINE_DIR/state.json" ]]; then
     already "state.json"
@@ -420,17 +360,16 @@ else
   "active_recording_path": null,
   "active_call_url": null,
   "active_call_source": null,
-  "retain_recordings": false,
-  "transcription_mode": "live"
+  "retain_recordings": false
 }
 EOF
     success "state.json created"
 fi
 
 # ============================================================
-# STEP 10: Anthropic API Key
+# STEP 9: Anthropic API Key
 # ============================================================
-step 10 "Anthropic API key"
+step 9 "Anthropic API key"
 
 api_key_set=false
 
@@ -481,7 +420,7 @@ fi
 # ============================================================
 # STEP 11: Obsidian
 # ============================================================
-step 11 "Obsidian (transcript viewer)"
+step 10 "Obsidian (transcript viewer)"
 
 if [[ -d "/Applications/Obsidian.app" ]] || brew list --cask obsidian &>/dev/null 2>&1; then
     already "Obsidian"
@@ -503,7 +442,7 @@ fi
 # ============================================================
 # STEP 12: Ollama (local AI for summaries)
 # ============================================================
-step 12 "Ollama (local AI for summaries)"
+step 11 "Ollama (local AI for summaries)"
 
 if command -v ollama &>/dev/null || [[ -d "/Applications/Ollama.app" ]]; then
     already "Ollama"
@@ -542,7 +481,7 @@ fi
 # ============================================================
 # STEP 13: Google Calendar (Optional)
 # ============================================================
-step 13 "Google Calendar integration (optional)"
+step 12 "Google Calendar integration (optional)"
 
 if [[ -f "$ENGINE_DIR/.credentials/google_token.json" ]]; then
     already "Google Calendar authenticated"
@@ -589,11 +528,8 @@ check "Xcode CLI tools"        "xcode-select -p"
 check "Homebrew"                "command -v brew"
 check "Python 3.12"             "command -v python3.12"
 check "ffmpeg"                  "command -v ffmpeg"
-check "cmake"                   "command -v cmake"
 check "Python venv"             "test -f $VENV_DIR/bin/python"
 check "Python packages"         "$VENV_DIR/bin/python -c 'import rumps, psutil, anthropic'"
-check "whisper-cli"             "test -x $WHISPER_BINARY"
-check "whisper model"           "test -f $WHISPER_MODEL"
 check "capture-audio"           "test -x $CAPTURE_BINARY"
 check "Ollama"                  "command -v ollama"
 check "Qwen model"             "ollama list 2>/dev/null | grep -q qwen3:4b"

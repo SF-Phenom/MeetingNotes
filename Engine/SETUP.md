@@ -12,7 +12,7 @@ cd ~/MeetingNotes_RT
 ```
 
 The script is idempotent (safe to re-run) and will skip anything already installed.
-It takes 10–20 minutes on a fresh machine, mostly due to model downloads (~4 GB total).
+It takes 5–15 minutes on a fresh machine, mostly due to the Parakeet model download (~2.5 GB).
 
 If you prefer to install manually, or if the script hits an issue, follow the step-by-step guide below.
 
@@ -104,70 +104,20 @@ brew install ffmpeg
 
 ---
 
-## 6. whisper.cpp with Metal Acceleration (Batch Mode)
+## 6. Parakeet (Transcription Engine)
 
-whisper.cpp runs speech-to-text locally using the GPU (Metal). This is the "batch" transcription engine — used for post-recording transcription.
+Parakeet is the transcription engine — it runs on Apple Silicon via MLX and provides real-time live transcription during recordings. It was installed with `pip install -r Engine/requirements.txt` in step 4.
 
-```bash
-# Install cmake (build tool)
-brew install cmake
-
-# Clone and build whisper.cpp with Metal support
-cd ~
-git clone https://github.com/ggerganov/whisper.cpp.git
-cd whisper.cpp
-cmake -B build -DWHISPER_METAL=ON
-cmake --build build --config Release
-```
-
-Download the model (large-v3-turbo — best quality/speed balance on M4, ~1.5GB):
-
-```bash
-cd ~/whisper.cpp
-./models/download-ggml-model.sh large-v3-turbo
-```
-
-Download the Silero VAD model (Voice Activity Detection — filters silence):
-
-```bash
-cd ~/whisper.cpp/models
-curl -LO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/for-tests-silero-v6.2.0-ggml.bin
-```
-
-Verify it works:
-
-```bash
-~/whisper.cpp/build/bin/whisper-cli --help
-```
-
-You should see the whisper.cpp help output.
-
-> **Note:** The whisper path defaults to `~/whisper.cpp`. To use a different location, set the `WHISPER_DIR` environment variable before launching the app.
-
-**Alternative model:** If `large-v3-turbo` is too slow, you can switch to `medium.en` (faster, English-only, ~750MB):
-```bash
-./models/download-ggml-model.sh medium.en
-```
-Then edit `WHISPER_MODEL` in `Engine/app/transcriber.py` to point to the new model file.
-
----
-
-## 7. Parakeet (Live Transcription Engine)
-
-Parakeet is the default transcription engine — it runs on Apple Silicon via MLX and provides real-time live transcription during recordings. It was installed with `pip install -r Engine/requirements.txt` in step 4.
-
-The model (~2.5 GB) downloads automatically the first time you start a recording in live mode. To pre-download:
+The model (~2.5 GB) downloads automatically the first time you start a recording. To pre-download:
 
 ```bash
 source Engine/.venv/bin/activate
 python3 -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')"
 ```
 
-> **Transcription modes:** The app supports "live" (Parakeet, real-time) and "batch" (whisper.cpp, post-recording). You can switch modes from the menubar. Live is the default.
-
 ---
 
-## 8. Anthropic API Key (Optional)
+## 7. Anthropic API Key (Optional)
 
 The pipeline sends transcript text (never audio) to Claude for summarization. If you have an API key from [console.anthropic.com](https://console.anthropic.com/):
 
@@ -186,7 +136,7 @@ echo $ANTHROPIC_API_KEY
 
 ---
 
-## 9. Ollama + Qwen (Local Summarization Fallback)
+## 8. Ollama + Qwen (Local Summarization Fallback)
 
 If you don't have an Anthropic API key, or if the API is unreachable, the app falls back to a local model via [Ollama](https://ollama.ai):
 
@@ -205,7 +155,7 @@ Ollama runs in the background. The app auto-detects it when Claude is unavailabl
 
 ---
 
-## 10. Google Calendar Integration (Optional)
+## 9. Google Calendar Integration (Optional)
 
 Auto-populates meeting name and participants from your Google Calendar. If you skip this, the pipeline still works — you just won't get calendar metadata.
 
@@ -234,7 +184,7 @@ The token is saved to `Engine/.credentials/google_token.json` and auto-refreshes
 
 ---
 
-## 11. Build the Swift Audio Capture Binary
+## 10. Build the Swift Audio Capture Binary
 
 ```bash
 cd ~/MeetingNotes_RT/Engine/CaptureAudio
@@ -250,7 +200,7 @@ cp .build/release/CaptureAudio ~/MeetingNotes_RT/Engine/.bin/capture-audio
 
 ---
 
-## 12. Obsidian (Transcript Viewer)
+## 11. Obsidian (Transcript Viewer)
 
 Install [Obsidian](https://obsidian.md/) to browse and search your meeting transcripts:
 
@@ -268,7 +218,7 @@ Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes_RT/tr
 
 ---
 
-## 13. macOS Permissions
+## 12. macOS Permissions
 
 The app needs several permissions. macOS will prompt you the first time each is needed:
 
@@ -285,7 +235,7 @@ The app needs several permissions. macOS will prompt you the first time each is 
 
 ---
 
-## 14. Run the App
+## 13. Run the App
 
 ```bash
 cd ~/MeetingNotes_RT
@@ -299,7 +249,7 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 ---
 
-## 15. First-Run Checklist
+## 14. First-Run Checklist
 
 - [ ] Menu bar icon appears (🎙)
 - [ ] Edit `Settings/context.md` with your role, team, and meeting info
@@ -317,7 +267,6 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 | Variable | Default | Purpose |
 |---|---|---|
 | `MEETINGNOTES_HOME` | `~/MeetingNotes_RT` | Base directory for the project |
-| `WHISPER_DIR` | `~/whisper.cpp` | Location of whisper.cpp installation |
 | `ANTHROPIC_API_KEY` | (none) | Claude API key for summarization |
 
 ---
@@ -332,11 +281,7 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 **Swift binary won't compile:** Ensure Xcode Command Line Tools are installed. Requires macOS 14+.
 
-**Transcription fails with "whisper-cli not found":** Build whisper.cpp per step 6. Binary should be at `~/whisper.cpp/build/bin/whisper-cli`.
-
-**Transcription fails with "model not found":** Download the model: `cd ~/whisper.cpp && ./models/download-ggml-model.sh large-v3-turbo`
-
-**Live transcription not working:** Ensure `parakeet-mlx` is installed (`pip list | grep parakeet`). The model downloads on first use (~2.5 GB).
+**Transcription not working:** Ensure `parakeet-mlx` is installed (`pip list | grep parakeet`). The model downloads on first use (~2.5 GB).
 
 **Claude summarization fails:** Check `ANTHROPIC_API_KEY` is set. If using Ollama fallback, ensure `ollama serve` is running.
 

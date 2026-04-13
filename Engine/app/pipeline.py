@@ -4,12 +4,11 @@ Pipeline — orchestrates the full transcription pipeline for MeetingNotes.
 process_recording(wav_path) is the single entry point:
   1. Load sidecar metadata (.meta.json)
   2. Parse source / date / time from filename
-  3. Build initial prompt from context.md (whisper mode)
-  4. Transcribe with Parakeet (live) or whisper.cpp (batch)
-  5. Summarize with Claude or Ollama
-  6. Format and write the .md transcript
-  7. Update state (transcripts_since_checkin, pending_deletion)
-  8. Return the path to the written .md file
+  3. Transcribe with Parakeet
+  4. Summarize with Claude or Ollama
+  5. Format and write the .md transcript
+  6. Update state (transcripts_since_checkin, pending_deletion)
+  7. Return the path to the written .md file
 
 Can be run standalone:
     python -m app.pipeline Engine/recordings/queue/some-recording.wav
@@ -29,7 +28,7 @@ from . import state as state_mod
 from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .formatter import format_transcript, slugify
 from .summarizer import summarize
-from .transcriber import transcribe, transcribe_with_parakeet, build_initial_prompt
+from .transcriber import transcribe_with_parakeet
 
 logger = logging.getLogger(__name__)
 
@@ -194,21 +193,11 @@ def process_recording(
             srt_path="",
         )
     else:
-        current_state = state_mod.load()
-        mode = current_state.get("transcription_mode", "live")
-        if mode not in ("live", "batch"):
-            mode = "live"
         try:
-            if mode == "live":
-                logger.info("Transcribing with Parakeet (live mode, batch pass)")
-                transcription = transcribe_with_parakeet(wav_path)
-            else:
-                initial_prompt = build_initial_prompt()
-                logger.info("Transcribing with whisper.cpp (batch mode)")
-                transcription = transcribe(wav_path, initial_prompt=initial_prompt or None)
+            logger.info("Transcribing with Parakeet")
+            transcription = transcribe_with_parakeet(wav_path)
             logger.info(
-                "Transcription done (%s): %d chars, %d min",
-                mode,
+                "Transcription done: %d chars, %d min",
                 len(transcription.plain_text),
                 transcription.duration_minutes,
             )

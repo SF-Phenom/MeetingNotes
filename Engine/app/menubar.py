@@ -143,9 +143,6 @@ class MeetingNotesApp(rumps.App):
         # Model selection submenu
         items.append(self._build_model_submenu())
 
-        # Transcription mode submenu
-        items.append(self._build_mode_submenu())
-
         # Retain recordings toggle
         retain_item = rumps.MenuItem(
             "Retain Recordings",
@@ -374,19 +371,14 @@ class MeetingNotesApp(rumps.App):
             if url:
                 state_mod.update(active_call_url=url)
 
-            # Start realtime transcription if mode is "live"
-            current_state = state_mod.load()
-            mode = current_state.get("transcription_mode", "live")
-            if mode not in ("live", "batch"):
-                mode = "live"
-            if mode == "live":
-                try:
-                    self._realtime_transcriber = RealtimeTranscriber()
-                    self._realtime_transcriber.start(path)
-                    logger.info("Realtime transcriber started")
-                except Exception as e:
-                    logger.error("Failed to start realtime transcriber: %s", e, exc_info=True)
-                    self._realtime_transcriber = None
+            # Start realtime transcription
+            try:
+                self._realtime_transcriber = RealtimeTranscriber()
+                self._realtime_transcriber.start(path)
+                logger.info("Realtime transcriber started")
+            except Exception as e:
+                logger.error("Failed to start realtime transcriber: %s", e, exc_info=True)
+                self._realtime_transcriber = None
 
             self._build_recording_menu(source, "0:00")
             logger.info("Recording started: path=%s", path)
@@ -671,45 +663,6 @@ class MeetingNotesApp(rumps.App):
             ),
         )
 
-    # ── Transcription mode selection ──────────────────────────────────────────
-
-    def _build_mode_submenu(self) -> rumps.MenuItem:
-        """Build the 'Transcription Mode' submenu."""
-        current_mode = state_mod.load().get("transcription_mode", "live")
-        # Normalize legacy values from earlier versions
-        if current_mode not in ("live", "batch"):
-            current_mode = "live"
-            state_mod.update(transcription_mode="live")
-        submenu = rumps.MenuItem("Transcription Mode")
-
-        live_item = rumps.MenuItem(
-            "Live (parakeet-mlx)", callback=self._select_mode
-        )
-        if current_mode == "live":
-            live_item.state = 1
-        submenu.add(live_item)
-
-        batch_item = rumps.MenuItem(
-            "After Meeting (whisper.cpp)", callback=self._select_mode
-        )
-        if current_mode == "batch":
-            batch_item.state = 1
-        submenu.add(batch_item)
-
-        return submenu
-
-    def _select_mode(self, sender) -> None:
-        """Handle transcription mode selection."""
-        title = sender.title
-        if "After Meeting" in title:
-            mode = "batch"
-        else:
-            mode = "live"
-
-        state_mod.update(transcription_mode=mode)
-        logger.info("User selected transcription mode: %s", mode)
-        self._build_idle_menu()
-
     # ── Live transcript viewer ────────────────────────────────────────────────
 
     def _open_live_transcript(self, _sender) -> None:
@@ -914,15 +867,12 @@ def main():
                 active_call_url=None,
                 active_call_source=None,
             )
-        # Remove deprecated transcription_engine key
-        if "transcription_engine" in current_state:
-            logger.info("Removing deprecated transcription_engine from state")
-            current_state.pop("transcription_engine")
-            state_mod.save(current_state)
-        # Normalize transcription_mode from older versions
-        mode = current_state.get("transcription_mode")
-        if mode not in ("live", "batch"):
-            updates["transcription_mode"] = "live"
+        # Remove deprecated keys from older versions
+        for key in ("transcription_engine", "transcription_mode"):
+            if key in current_state:
+                logger.info("Removing deprecated %s from state", key)
+                current_state.pop(key)
+                state_mod.save(current_state)
         if updates:
             state_mod.update(**updates)
     except Exception as e:

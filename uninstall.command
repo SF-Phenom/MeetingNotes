@@ -38,9 +38,9 @@ echo "  This will remove MeetingNotes and its dependencies."
 echo ""
 echo "  ${GREEN}Kept:${RESET}  transcripts/, projects/, Settings/ (your data)"
 echo "  ${GREEN}Kept:${RESET}  Obsidian vault config (.obsidian/)"
-echo "  ${GREEN}Kept:${RESET}  Homebrew, Python, ffmpeg, cmake, Obsidian"
+echo "  ${GREEN}Kept:${RESET}  Homebrew, Python, ffmpeg, Obsidian"
 echo ""
-echo "  ${RED}Removed:${RESET}  Engine/ (app code, whisper.cpp ~2.5GB, Python venv,"
+echo "  ${RED}Removed:${RESET}  Engine/ (app code, Python venv, Parakeet model,"
 echo "            Swift binary, logs, recordings, credentials)"
 echo "  ${RED}Removed:${RESET}  ANTHROPIC_API_KEY from ~/.zshrc"
 echo ""
@@ -102,10 +102,10 @@ else
 fi
 
 # ============================================================
-# Remove whisper.cpp
+# Remove whisper.cpp (legacy, may not exist)
 # ============================================================
 if [[ -d "$HOME/whisper.cpp" ]]; then
-    info "Removing ~/whisper.cpp (~2.5GB)..."
+    info "Removing ~/whisper.cpp (legacy, ~2.5GB)..."
     rm -rf "$HOME/whisper.cpp"
     success "whisper.cpp removed"
 fi
