@@ -25,12 +25,65 @@ logger = logging.getLogger(__name__)
 BINARY = os.path.join(BASE_DIR, "Engine", ".bin", "capture-audio")
 LOCK_FILE = os.path.join(ACTIVE_DIR, ".lock")
 
+# Exit code the Swift binary uses to signal "Screen Recording permission
+# denied" from the check-screen-recording subcommand.
+SCREEN_RECORDING_PERMISSION_DENIED = 10
+
 _process: subprocess.Popen | None = None
 
 
 def _ensure_dirs() -> None:
     os.makedirs(ACTIVE_DIR, exist_ok=True)
     os.makedirs(QUEUE_DIR, exist_ok=True)
+
+
+def check_screen_recording_permission(timeout_secs: float = 8.0) -> bool:
+    """Probe the capture-audio binary for Screen Recording access.
+
+    Runs ``capture-audio check-screen-recording`` which calls
+    SCShareableContent at startup. Returns True when access is granted (or
+    when we can't probe and shouldn't block recording), False only on
+    explicit denial (exit code 10).
+
+    The first call triggers macOS's "grant access" dialog; subsequent calls
+    after denial return immediately. Re-checking happens at each menubar
+    launch — revoking the permission shows up on next start.
+    """
+    if not os.path.exists(BINARY):
+        logger.debug(
+            "capture-audio binary missing at %s; skipping permission probe",
+            BINARY,
+        )
+        return True  # Can't probe — assume OK so we don't block the menubar.
+
+    try:
+        result = subprocess.run(
+            [BINARY, "check-screen-recording"],
+            capture_output=True,
+            timeout=timeout_secs,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("Could not probe Screen Recording permission: %s", e)
+        return True
+
+    if result.returncode == 0:
+        logger.info("Screen Recording permission: granted")
+        return True
+    if result.returncode == SCREEN_RECORDING_PERMISSION_DENIED:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        logger.warning(
+            "Screen Recording permission denied — system audio will not be "
+            "captured. Grant access in System Settings → Privacy & Security "
+            "→ Screen Recording. Details: %s",
+            stderr,
+        )
+        return False
+    logger.warning(
+        "capture-audio check-screen-recording exited %d: %s",
+        result.returncode,
+        result.stderr.decode("utf-8", errors="replace").strip(),
+    )
+    return True  # Unknown failure — don't block recording
 
 
 def _kill_stray_capture_processes(exclude_pid: int | None = None) -> int:

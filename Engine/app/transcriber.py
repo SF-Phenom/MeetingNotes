@@ -7,10 +7,12 @@ Returns a TranscriptionResult with plain text, timestamped text, and duration.
 
 from __future__ import annotations
 
-import os
 import logging
+import os
+import threading
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +40,54 @@ PARAKEET_CHUNK_SECS = 300  # 5 minutes
 # Leaves headroom for macOS, the app, and other processes.
 MLX_MEMORY_LIMIT = 6 * 1024 * 1024 * 1024  # 6 GB
 
+# Diagnostic watchdog: if mx.synchronize() blocks longer than this we log
+# loudly. The call itself is a C extension and can't be cancelled from Python,
+# so the watchdog is observational — its value is (1) making wedged-GPU
+# symptoms obvious in logs instead of the app silently freezing, and (2)
+# letting realtime callers mark the session unhealthy so future cycles abort.
+GPU_SYNC_WATCHDOG_SECS = 60
+
 _parakeet_model = None  # lazy-loaded, stays in memory for reuse
 _parakeet_stream = None  # reusable MLX GPU stream
+
+
+def synchronize_with_watchdog(
+    stream,
+    name: str = "mlx",
+    on_timeout: Callable[[], None] | None = None,
+    timeout_secs: float = GPU_SYNC_WATCHDOG_SECS,
+) -> None:
+    """Call mx.synchronize(stream) with a diagnostic watchdog.
+
+    If the call blocks longer than ``timeout_secs``, log an error and invoke
+    ``on_timeout`` (if provided) so a higher-level session can mark itself
+    unhealthy. mx.synchronize is a blocking C call — we cannot interrupt it.
+    """
+    import mlx.core as mx
+
+    fired = threading.Event()
+
+    def _timeout_cb() -> None:
+        fired.set()
+        logger.error(
+            "%s: mx.synchronize has been blocked for >%.0fs — GPU may be "
+            "wedged. Check Metal diagnostics in Console.app.",
+            name,
+            timeout_secs,
+        )
+        if on_timeout is not None:
+            try:
+                on_timeout()
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.error("Watchdog on_timeout callback failed: %s", exc)
+
+    timer = threading.Timer(timeout_secs, _timeout_cb)
+    timer.daemon = True
+    timer.start()
+    try:
+        mx.synchronize(stream)
+    finally:
+        timer.cancel()
 
 
 def _load_parakeet_model():
@@ -66,7 +114,7 @@ def _transcribe_chunk(model, wav_chunk_path: str, decoding) -> object:
     import mlx.core as mx
     with mx.stream(_parakeet_stream):
         result = model.transcribe(wav_chunk_path, decoding_config=decoding)
-    mx.synchronize(_parakeet_stream)
+    synchronize_with_watchdog(_parakeet_stream, name="parakeet-batch")
     mx.metal.clear_cache()
     return result
 

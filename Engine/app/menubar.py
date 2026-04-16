@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import queue
 import sys
 import threading
 import time
@@ -27,11 +28,11 @@ if _ENGINE_DIR not in sys.path:
 
 from app import state as state_mod
 from app import recorder
-from app import call_detector
 from app import pipeline
 from app import checkin
 from app import cleanup
 from app import summarizer
+from app.call_detector_proxy import CallDetectorProxy
 from app.realtime_transcriber import RealtimeTranscriber
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
@@ -79,13 +80,41 @@ class MeetingNotesApp(rumps.App):
         self._recording_start: float | None = None
         self._skipped_session: str | None = None  # source string of a skipped call
         self._last_detected_source: str | None = None
-        self._prompt_pending: bool = False  # guard against double-prompts
+        # Non-blocking call-detected prompt. Populated by detection when a
+        # recordable call is seen; cleared by the user action menu items or
+        # when the call goes away. Shape: {"source": str, "url": str|None}.
+        self._pending_call_prompt: dict | None = None
         self._transcribing: bool = False  # True while background transcription runs
         self._checkin_due: bool = False  # True when check-in threshold is reached
         self._no_call_count: int = 0  # Consecutive "no call detected" ticks for debounce
 
         # Realtime transcription
         self._realtime_transcriber: RealtimeTranscriber | None = None
+
+        # Call-detection worker — a separate process that runs osascript/psutil
+        # calls so the main process (which hosts MLX GPU threads) never forks
+        # while Parakeet is running. See call_detector_proxy.py for details.
+        self._call_detector = CallDetectorProxy()
+        self._call_detector.start()
+
+        # Main-thread UI dispatch queue. Background threads push callables here;
+        # the @rumps.timer(0.1) _ui_drain_tick drains them on the main thread.
+        # rumps/AppKit is not thread-safe — any rumps.notification/alert/menu
+        # mutation from a non-main thread must go through this queue.
+        self._ui_queue: queue.Queue = queue.Queue()
+
+        # Probe Screen Recording permission once at startup. If denied, the
+        # menubar surfaces a persistent item with a link to System Settings
+        # instead of silently falling back to mic-only.
+        self._screen_recording_ok: bool = recorder.check_screen_recording_permission()
+        if not self._screen_recording_ok:
+            # Queue a one-time notification — the drain timer fires once the
+            # rumps runloop is active so it'll pop shortly after launch.
+            self._ui_dispatch(lambda: rumps.notification(
+                title="MeetingNotes",
+                subtitle="System audio unavailable",
+                message="Grant Screen Recording in System Settings → Privacy.",
+            ))
 
         # Model selection
         self._available_models: list[str] = []  # Ollama models discovered at startup
@@ -109,6 +138,24 @@ class MeetingNotesApp(rumps.App):
             rumps.MenuItem("Start Recording", callback=self._manual_start),
             None,  # separator
         ]
+
+        # Non-blocking call-detected prompt (replaces the old rumps.alert
+        # modal that froze the detection timer while shown).
+        if self._pending_call_prompt:
+            src = self._pending_call_prompt["source"]
+            items.append(rumps.MenuItem(
+                "🔴 Record {} call".format(src),
+                callback=self._accept_call_prompt,
+            ))
+            items.append(rumps.MenuItem(
+                "Skip this call",
+                callback=self._skip_call_prompt,
+            ))
+            items.append(rumps.MenuItem(
+                "Never for {}".format(src),
+                callback=self._suppress_call_source,
+            ))
+            items.append(None)
 
         if self._transcribing:
             items.append(rumps.MenuItem("Transcribing..."))
@@ -162,6 +209,14 @@ class MeetingNotesApp(rumps.App):
                 rumps.MenuItem("Add API Key", callback=self._add_api_key)
             )
 
+        # Screen Recording permission status — shown only when denied so
+        # the user can jump straight to System Settings to grant it.
+        if not self._screen_recording_ok:
+            items.append(rumps.MenuItem(
+                "⚠ System audio unavailable — grant Screen Recording",
+                callback=self._open_screen_recording_settings,
+            ))
+
         items.extend([
             rumps.MenuItem("Check for Updates", callback=self._check_for_updates),
             None,
@@ -207,16 +262,35 @@ class MeetingNotesApp(rumps.App):
         self.menu = items
         self.title = ICON_RECORDING
 
+    # ── Main-thread UI dispatch ───────────────────────────────────────────────
+
+    def _ui_dispatch(self, fn) -> None:
+        """Schedule `fn` to run on the main rumps thread on the next drain tick."""
+        self._ui_queue.put(fn)
+
+    @rumps.timer(0.1)
+    def _ui_drain_tick(self, _sender) -> None:
+        """Drain all pending UI callables on the main thread."""
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                fn()
+            except Exception as e:
+                logger.error("UI queue callable raised: %s", e, exc_info=True)
+
     # ── Timers ────────────────────────────────────────────────────────────────
 
     @rumps.timer(10)
     def _call_detection_tick(self, _sender) -> None:
-        """Poll for active calls every 10 seconds."""
-        # Call detection uses subprocess (fork+exec) for AppleScript.
-        # fork() while MLX GPU threads are active corrupts malloc locks,
-        # so skip detection entirely while transcription is running.
-        if self._transcribing:
-            return
+        """Poll for active calls every 10 seconds.
+
+        Detection runs via CallDetectorProxy in a separate process, so the
+        main process never forks while MLX GPU threads are active. There is
+        no need to skip detection during transcription anymore.
+        """
         try:
             self._run_call_detection()
         except Exception as e:
@@ -259,7 +333,7 @@ class MeetingNotesApp(rumps.App):
         # URLs, which fail during screenshare, minimized windows, etc.
         # Once we're recording, we only care if the app is still running.
         if currently_recording and self._last_detected_source is not None:
-            still_alive = call_detector.is_call_still_active(
+            still_alive = self._call_detector.is_call_still_active(
                 self._last_detected_source
             )
             if still_alive:
@@ -286,7 +360,7 @@ class MeetingNotesApp(rumps.App):
             return
 
         # ── Not recording: full detection for new calls ───────────────
-        detected = call_detector.detect_active_call()
+        detected = self._call_detector.detect_active_call()
 
         if detected:
             source = detected["source"]
@@ -305,61 +379,72 @@ class MeetingNotesApp(rumps.App):
             if self._skipped_session == source:
                 return
 
-            # Don't double-prompt
-            if self._prompt_pending:
+            # Prompt already pending for this source — keep as-is (don't spam
+            # notifications on every 10s tick).
+            if (
+                self._pending_call_prompt is not None
+                and self._pending_call_prompt.get("source") == source
+            ):
                 return
 
-            # Defer the dialog if realtime GPU transcription is active —
-            # NSAlert + background Metal ops cause assertion failures
-            if self._realtime_transcriber and self._realtime_transcriber.is_busy:
-                logger.debug("Deferring call prompt — GPU transcription in progress")
-                return
-
-            self._prompt_pending = True
-            try:
-                self._prompt_to_record(source, url)
-            finally:
-                self._prompt_pending = False
-
-        else:
-            # No call detected and not recording — reset state
-            self._last_detected_source = None
-            self._skipped_session = None
-
-    def _prompt_to_record(self, source: str, url: str | None) -> None:
-        """Show a dialog asking the user whether to record the detected call."""
-        logger.info("Prompting user to record: source=%s", source)
-
-        response = rumps.alert(
-            title="{} call detected".format(source),
-            message="Would you like to record this meeting?",
-            ok="Record",
-            cancel="Skip",
-            other="Never for {}".format(source),
-        )
-
-        # rumps.alert returns:
-        #   1  → OK button ("Record")
-        #   0  → Cancel button ("Skip")
-        #  -1  → Other button ("Never for <source>")
-        if response == 1:
-            logger.info("User chose to record: source=%s", source)
-            self._do_start_recording(source, url)
-        elif response == 0:
-            logger.info("User skipped recording for source=%s", source)
-            self._skipped_session = source
-        elif response == -1:
-            logger.info("User suppressed source=%s", source)
-            current_state = state_mod.load()
-            suppressed = list(current_state.get("suppressed_sources", []))
-            if source not in suppressed:
-                suppressed.append(source)
-            state_mod.update(suppressed_sources=suppressed)
+            logger.info("Call detected, offering record prompt: source=%s", source)
+            self._pending_call_prompt = {"source": source, "url": url}
+            self._build_idle_menu()
             rumps.notification(
                 title="MeetingNotes",
-                subtitle="",
-                message="{} calls will no longer be detected.".format(source),
+                subtitle="{} call detected".format(source),
+                message="Click the menubar icon to record.",
             )
+
+        else:
+            # No call detected and not recording — reset state, including any
+            # pending prompt (the call went away before the user acted).
+            self._last_detected_source = None
+            self._skipped_session = None
+            if self._pending_call_prompt is not None:
+                logger.debug("Clearing stale call prompt — no call detected")
+                self._pending_call_prompt = None
+                self._build_idle_menu()
+
+    # ── Call-prompt click handlers ─────────────────────────────────────────────
+
+    def _accept_call_prompt(self, _sender) -> None:
+        """User clicked 'Record <Source> call' in the menu."""
+        if not self._pending_call_prompt:
+            return
+        prompt = self._pending_call_prompt
+        self._pending_call_prompt = None
+        logger.info("User accepted call prompt: source=%s", prompt["source"])
+        self._do_start_recording(prompt["source"], prompt.get("url"))
+
+    def _skip_call_prompt(self, _sender) -> None:
+        """User clicked 'Skip this call' in the menu."""
+        if not self._pending_call_prompt:
+            return
+        source = self._pending_call_prompt["source"]
+        self._pending_call_prompt = None
+        self._skipped_session = source
+        logger.info("User skipped call prompt: source=%s", source)
+        self._build_idle_menu()
+
+    def _suppress_call_source(self, _sender) -> None:
+        """User clicked 'Never for <Source>' in the menu."""
+        if not self._pending_call_prompt:
+            return
+        source = self._pending_call_prompt["source"]
+        self._pending_call_prompt = None
+        current_state = state_mod.load()
+        suppressed = list(current_state.get("suppressed_sources", []))
+        if source not in suppressed:
+            suppressed.append(source)
+        state_mod.update(suppressed_sources=suppressed)
+        logger.info("User suppressed call source: %s", source)
+        self._build_idle_menu()
+        rumps.notification(
+            title="MeetingNotes",
+            subtitle="",
+            message="{} calls will no longer be detected.".format(source),
+        )
 
     # ── Recording actions ──────────────────────────────────────────────────────
 
@@ -453,6 +538,10 @@ class MeetingNotesApp(rumps.App):
                 recorder.stop_recording()
             except Exception as e:
                 logger.error("Error stopping recording on quit: %s", e)
+        try:
+            self._call_detector.stop()
+        except Exception as e:
+            logger.error("Error stopping call detector worker: %s", e)
         logger.info("MeetingNotes app stopped")
         rumps.quit_application()
 
@@ -515,55 +604,58 @@ class MeetingNotesApp(rumps.App):
             succeeded = 0
             failed = 0
             last_path = None
-            for i, wav_path in enumerate(wav_paths):
-                try:
-                    logger.info("Transcribing: %s", os.path.basename(wav_path))
-                    # Only the first file gets pre-transcribed text (from realtime)
-                    pre_text = pre_transcribed_text if i == 0 else None
-                    result = pipeline.process_recording(
-                        wav_path, pre_transcribed_text=pre_text
-                    )
-                    if result:
-                        succeeded += 1
-                        last_path = result
-                    else:
+            try:
+                for i, wav_path in enumerate(wav_paths):
+                    try:
+                        logger.info("Transcribing: %s", os.path.basename(wav_path))
+                        # Only the first file gets pre-transcribed text (from realtime)
+                        pre_text = pre_transcribed_text if i == 0 else None
+                        result = pipeline.process_recording(
+                            wav_path, pre_transcribed_text=pre_text
+                        )
+                        if result:
+                            succeeded += 1
+                            last_path = result
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        logger.error("Pipeline error for %s: %s", wav_path, e, exc_info=True)
                         failed += 1
-                except Exception as e:
-                    logger.error("Pipeline error for %s: %s", wav_path, e, exc_info=True)
-                    failed += 1
+            finally:
+                # Always clear the transcribing flag — a hang here used to wedge
+                # the flag permanently and block future transcriptions.
+                self._transcribing = False
 
-            self._transcribing = False
-            # Update menu on main thread via timer (rumps is not thread-safe)
-            # We set a flag and let the next timer tick rebuild the menu
-            self._build_idle_menu()
+            # Marshal all UI updates back onto the main thread.
+            self._ui_dispatch(self._build_idle_menu)
 
-            # Show completion notification
             if succeeded > 0:
                 subtitle = "{} transcript{} ready".format(
                     succeeded, "s" if succeeded > 1 else ""
                 )
                 message = os.path.basename(last_path) if last_path else ""
-                rumps.notification(
+                self._ui_dispatch(lambda: rumps.notification(
                     title="MeetingNotes",
                     subtitle=subtitle,
                     message=message,
-                )
+                ))
             if failed > 0:
-                rumps.notification(
+                failed_msg = "{} recording{} failed — check logs".format(
+                    failed, "s" if failed > 1 else ""
+                )
+                self._ui_dispatch(lambda: rumps.notification(
                     title="MeetingNotes",
                     subtitle="Transcription errors",
-                    message="{} recording{} failed — check logs".format(
-                        failed, "s" if failed > 1 else ""
-                    ),
-                )
+                    message=failed_msg,
+                ))
 
-            # Check if a check-in is now due after new transcripts
+            # Check if a check-in is now due after new transcripts.
             if succeeded > 0 and checkin.should_trigger_checkin():
-                rumps.notification(
+                self._ui_dispatch(lambda: rumps.notification(
                     title="MeetingNotes",
                     subtitle="Check-in ready",
                     message="You have enough new transcripts for a project check-in.",
-                )
+                ))
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
@@ -739,6 +831,16 @@ class MeetingNotesApp(rumps.App):
         )
         self._build_idle_menu()
 
+    # ── Permissions ────────────────────────────────────────────────────────────
+
+    def _open_screen_recording_settings(self, _sender) -> None:
+        """Open the Screen Recording pane in System Settings."""
+        import subprocess as sp
+        sp.Popen([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        ])
+
     # ── Utilities ──────────────────────────────────────────────────────────────
 
     def _check_for_updates(self, _sender) -> None:
@@ -748,7 +850,11 @@ class MeetingNotesApp(rumps.App):
         ).start()
 
     def _run_update_check(self) -> None:
-        """Background thread: fetch from origin and compare."""
+        """Background thread: fetch from origin and compare.
+
+        All UI interaction is marshalled back to the main thread via
+        _ui_dispatch — rumps.alert/notification from a bg thread is unsafe.
+        """
         import subprocess as sp
 
         try:
@@ -771,21 +877,26 @@ class MeetingNotesApp(rumps.App):
             ).stdout.strip()
         except Exception as e:
             logger.error("Update check failed: %s", e)
-            rumps.notification(
+            self._ui_dispatch(lambda: rumps.notification(
                 title="MeetingNotes",
                 subtitle="Update check failed",
                 message="Could not reach GitHub. Check your internet connection.",
-            )
+            ))
             return
 
         if local == remote:
-            rumps.notification(
+            self._ui_dispatch(lambda: rumps.notification(
                 title="MeetingNotes",
                 subtitle="Up to date",
                 message="You're running the latest version.",
-            )
+            ))
             return
 
+        # Update available — show the install prompt on the main thread.
+        self._ui_dispatch(self._prompt_update_install)
+
+    def _prompt_update_install(self) -> None:
+        """Main thread: ask the user whether to install; spawn pull on yes."""
         response = rumps.alert(
             title="Update Available",
             message=(
@@ -796,10 +907,10 @@ class MeetingNotesApp(rumps.App):
             cancel="Later",
         )
         if response == 1:  # "Install" clicked
-            self._apply_update()
+            threading.Thread(target=self._run_update_apply, daemon=True).start()
 
-    def _apply_update(self) -> None:
-        """Pull latest changes and restart the app."""
+    def _run_update_apply(self) -> None:
+        """Background thread: git pull; dispatch result UI back to main."""
         import subprocess as sp
 
         try:
@@ -809,25 +920,31 @@ class MeetingNotesApp(rumps.App):
             )
             if result.returncode != 0:
                 logger.error("git pull failed: %s", result.stderr)
-                rumps.alert(
+                self._ui_dispatch(lambda: rumps.alert(
                     title="Update Failed",
                     message="Could not pull updates. Check Engine/logs/app.log for details.",
-                )
+                ))
                 return
         except Exception as e:
             logger.error("Update pull failed: %s", e)
-            rumps.alert(title="Update Failed", message=str(e))
+            err_msg = str(e)
+            self._ui_dispatch(lambda: rumps.alert(
+                title="Update Failed", message=err_msg,
+            ))
             return
 
         logger.info("Update applied, restarting app")
+        self._ui_dispatch(self._restart_after_update)
+
+    def _restart_after_update(self) -> None:
+        """Main thread: show 'installed' notification, relaunch, and quit."""
+        import subprocess as sp
+
         rumps.notification(
             title="MeetingNotes",
             subtitle="Update installed",
             message="Restarting...",
         )
-
-        # Restart: launch a new instance then quit this one
-        import sys
         sp.Popen(
             [sys.executable, os.path.join(_ENGINE_DIR, "app", "menubar.py")],
             start_new_session=True,

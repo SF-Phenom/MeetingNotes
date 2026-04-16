@@ -31,10 +31,31 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
     private var systemAudioFormatLogged: Bool = false
     private var systemAudioCallbackCount: Int = 0
 
+    // Pre-allocated AudioBufferList storage reused on every system-audio
+    // callback, sized for up to `systemAudioMaxChannels` planes. Keeps the
+    // SCK realtime audio thread free of `UnsafeMutableRawPointer.allocate()`
+    // (which can block inside malloc under memory pressure and cause
+    // dropouts). The SCK sample-handler queue is serial, so there is at
+    // most one reader of this buffer at a time.
+    private static let systemAudioMaxChannels = 8
+    private let systemAudioBufferListSize: Int
+    private let systemAudioBufferListPtr: UnsafeMutableRawPointer
+
     init(micWriter: WAVWriter, systemWriter: WAVWriter) {
         self.micWriter = micWriter
         self.systemWriter = systemWriter
+        let ablSize = MemoryLayout<AudioBufferList>.size
+            + (Self.systemAudioMaxChannels - 1) * MemoryLayout<AudioBuffer>.size
+        self.systemAudioBufferListSize = ablSize
+        self.systemAudioBufferListPtr = UnsafeMutableRawPointer.allocate(
+            byteCount: ablSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
         super.init()
+    }
+
+    deinit {
+        systemAudioBufferListPtr.deallocate()
     }
 
     // MARK: - Public API
@@ -197,14 +218,22 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
         // Pull the AudioBufferList from the CMSampleBuffer. For non-interleaved
         // PCM the list has `srcChannels` buffers (one per channel). For
         // interleaved it has a single buffer.
+        //
+        // Uses the pre-allocated `systemAudioBufferListPtr` so this hot audio
+        // callback never calls malloc/allocate. Bail out if a buffer with
+        // more channels than we sized for ever arrives (should never happen
+        // with stereo system audio).
+        if srcChannels > Self.systemAudioMaxChannels {
+            fputs(
+                "CaptureAudio: system audio arrived with \(srcChannels) channels, "
+                + "exceeds pre-allocated max of \(Self.systemAudioMaxChannels) — dropping buffer\n",
+                stderr
+            )
+            return
+        }
         let ablSize = MemoryLayout<AudioBufferList>.size
             + max(0, srcChannels - 1) * MemoryLayout<AudioBuffer>.size
-        let ablPtr = UnsafeMutableRawPointer.allocate(
-            byteCount: ablSize,
-            alignment: MemoryLayout<AudioBufferList>.alignment
-        )
-        defer { ablPtr.deallocate() }
-        let ablTyped = ablPtr.assumingMemoryBound(to: AudioBufferList.self)
+        let ablTyped = systemAudioBufferListPtr.assumingMemoryBound(to: AudioBufferList.self)
 
         var blockBufferOut: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(

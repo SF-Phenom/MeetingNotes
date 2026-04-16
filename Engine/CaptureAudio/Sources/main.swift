@@ -1,14 +1,49 @@
 import Foundation
 import Darwin
+import ScreenCaptureKit
 
 // MARK: - Argument Parsing
 
 func usage() -> Never {
-    fputs("Usage: CaptureAudio start --output /path/to/file.wav\n", stderr)
+    fputs("""
+        Usage:
+            CaptureAudio start --output /path/to/file.wav
+            CaptureAudio check-screen-recording
+        \n
+        """, stderr)
     exit(1)
 }
 
 let args = CommandLine.arguments
+
+// Permission pre-flight subcommand. Exits 0 if Screen Recording is granted,
+// 10 if denied, non-zero (other) for unexpected failures. Called by the
+// Python recorder at menubar startup so the UI can surface a clear message
+// instead of silently falling back to mic-only mode.
+let PERMISSION_DENIED_EXIT_CODE: Int32 = 10
+if args.count >= 2 && args[1] == "check-screen-recording" {
+    if #available(macOS 13.0, *) {
+        let sem = DispatchSemaphore(value: 0)
+        var success = false
+        Task {
+            do {
+                _ = try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false
+                )
+                success = true
+            } catch {
+                fputs("Screen Recording permission check failed: \(error)\n", stderr)
+            }
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 5)
+        exit(success ? 0 : PERMISSION_DENIED_EXIT_CODE)
+    } else {
+        fputs("ScreenCaptureKit requires macOS 13+\n", stderr)
+        exit(PERMISSION_DENIED_EXIT_CODE)
+    }
+}
+
 guard args.count >= 4,
       args[1] == "start",
       args[2] == "--output" else {

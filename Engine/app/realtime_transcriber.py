@@ -62,6 +62,10 @@ class RealtimeTranscriber:
         self._live_txt_path: str | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # Set by the GPU watchdog when mx.synchronize blocks longer than its
+        # timeout. The main loop checks this before each cycle and aborts
+        # gracefully instead of continuing to issue GPU work on a wedged stream.
+        self._unhealthy_event = threading.Event()
         self._model = None
         self._stream = None  # Reusable MLX GPU stream
         self._transcribing: bool = False  # Guard against overlapping cycles
@@ -94,6 +98,7 @@ class RealtimeTranscriber:
         self._current_chunk_text = ""
         self._last_file_size = WAV_HEADER_SIZE
         self._stop_event.clear()
+        self._unhealthy_event.clear()
 
         # Live transcript file: same name as WAV but .live.txt
         base = os.path.splitext(wav_path)[0]
@@ -158,6 +163,14 @@ class RealtimeTranscriber:
             return
 
         while not self._stop_event.is_set():
+            # If the GPU watchdog marked this session unhealthy, stop issuing
+            # new MLX work. The finalize path (stop()) still returns whatever
+            # chunks were completed before the wedge.
+            if self._unhealthy_event.is_set():
+                logger.error(
+                    "Realtime session marked unhealthy — aborting poll loop."
+                )
+                break
             self._stop_event.wait(timeout=POLL_INTERVAL)
             if self._stop_event.is_set():
                 break
@@ -284,12 +297,18 @@ class RealtimeTranscriber:
             # Transcribe the current chunk.
             import mlx.core as mx
             from parakeet_mlx.parakeet import DecodingConfig, Beam
-            from app.transcriber import PARAKEET_BEAM_SIZE
+            from app.transcriber import PARAKEET_BEAM_SIZE, synchronize_with_watchdog
             decoding = DecodingConfig(decoding=Beam(beam_size=PARAKEET_BEAM_SIZE))
             t0 = time.time()
             with mx.stream(self._stream):
                 result = self._model.transcribe(tmp_wav.name, decoding_config=decoding)
-            mx.synchronize(self._stream)
+            # Watchdog: if synchronize blocks longer than GPU_SYNC_WATCHDOG_SECS
+            # the session is marked unhealthy so the next loop iteration aborts.
+            synchronize_with_watchdog(
+                self._stream,
+                name="parakeet-realtime",
+                on_timeout=self._unhealthy_event.set,
+            )
             mx.metal.clear_cache()
             elapsed = time.time() - t0
 
