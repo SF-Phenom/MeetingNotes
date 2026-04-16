@@ -104,7 +104,7 @@ def load() -> dict:
 
 
 def save(state: dict) -> None:
-    """Write state atomically with file locking: lock, write .tmp, rename."""
+    """Write state atomically with file locking: lock, write .tmp, fsync, rename."""
     lock_path = STATE_PATH + ".lock"
     tmp_path = STATE_PATH + ".tmp"
     try:
@@ -114,6 +114,8 @@ def save(state: dict) -> None:
                 with open(tmp_path, "w") as f:
                     json.dump(state, f, indent=2)
                     f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.rename(tmp_path, STATE_PATH)
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
@@ -135,11 +137,15 @@ def update(**kwargs) -> dict:
             try:
                 state = load()
                 state.update(kwargs)
-                # Write directly (we already hold the lock)
+                # Write directly (we already hold the lock). fsync before
+                # rename so a crash mid-rename can't leave a half-written
+                # state.json visible after recovery.
                 tmp_path = STATE_PATH + ".tmp"
                 with open(tmp_path, "w") as f:
                     json.dump(state, f, indent=2)
                     f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.rename(tmp_path, STATE_PATH)
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
