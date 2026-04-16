@@ -42,7 +42,12 @@ class _FakeRealtime:
 
 @pytest.fixture
 def fake_realtime_cls(monkeypatch):
-    """Replace RealtimeTranscriber with a factory we can inspect."""
+    """Replace the realtime-engine factory with a fake we can inspect.
+
+    TranscriptionManager calls get_realtime_engine() (imported from
+    transcription_engine) to build the realtime transcriber. We patch that
+    inside tm_mod so the manager sees our fake, not a real Parakeet.
+    """
     instances: list[_FakeRealtime] = []
 
     def _factory():
@@ -50,7 +55,7 @@ def fake_realtime_cls(monkeypatch):
         instances.append(fake)
         return fake
 
-    monkeypatch.setattr(tm_mod, "RealtimeTranscriber", _factory)
+    monkeypatch.setattr(tm_mod, "get_realtime_engine", _factory)
     return instances
 
 
@@ -93,7 +98,7 @@ class TestRealtime:
         def _explode():
             raise RuntimeError("nope")
 
-        monkeypatch.setattr(tm_mod, "RealtimeTranscriber", _explode)
+        monkeypatch.setattr(tm_mod, "get_realtime_engine", _explode)
         m = TranscriptionManager(UIBridge(), rebuild, notify)
         assert m.start_realtime("/tmp/foo.wav") is False
         assert m.realtime_live_transcript_path is None

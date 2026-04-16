@@ -29,7 +29,7 @@ from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .formatter import format_transcript, slugify
 from .recording_file import RecordingFile
 from .summarizer import summarize
-from .transcriber import transcribe_with_parakeet
+from .transcription_engine import get_batch_engine
 
 logger = logging.getLogger(__name__)
 
@@ -164,16 +164,21 @@ def process_recording(
     logger.info("source=%s  date=%s  time=%s", source, date_str, time_str)
 
     # Step 2b: Enrich metadata from Google Calendar (best-effort, non-fatal)
+    #
+    # Broad catch is intentional: the Google API stack can raise a dozen
+    # different types (HttpError, RefreshError, TransportError, OAuth
+    # errors, etc.) and this enrichment is optional — we absolutely do not
+    # want any of them to fail the whole pipeline for a recording that
+    # transcribes + summarizes fine on its own.
     try:
         cal_meta = _calendar_enrich(wav_path)
-        # Calendar data fills gaps — sidecar values take priority
         for key, value in cal_meta.items():
             if key not in metadata:
                 metadata[key] = value
             elif key == "participants" and not metadata.get("participants"):
                 metadata[key] = value
         logger.info("Calendar enrichment applied to metadata.")
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — best-effort enrichment
         logger.warning("Calendar enrichment failed (non-fatal): %s", e)
 
     # If capture-audio produced a system-audio sibling track, mix it with
@@ -192,7 +197,9 @@ def process_recording(
             else:
                 logger.warning("Audio mix failed, transcribing mic-only")
                 transcribe_path = wav_path
-        except Exception as e:  # noqa: BLE001
+        except (OSError, ValueError) as e:
+            # OSError — file I/O; ValueError — malformed WAV header. Both
+            # are recoverable by falling back to the mic-only track.
             logger.warning("Audio mix raised: %s — transcribing mic-only", e)
             transcribe_path = wav_path
     else:
@@ -217,14 +224,15 @@ def process_recording(
         )
     else:
         try:
-            logger.info("Transcribing with Parakeet")
-            transcription = transcribe_with_parakeet(transcribe_path)
+            engine = get_batch_engine()
+            logger.info("Transcribing with %s", type(engine).__name__)
+            transcription = engine.transcribe(transcribe_path)
             logger.info(
                 "Transcription done: %d chars, %d min",
                 len(transcription.plain_text),
                 transcription.duration_minutes,
             )
-        except Exception as e:  # noqa: BLE001
+        except (RuntimeError, OSError, FileNotFoundError) as e:
             logger.error("Transcription failed: %s", e)
             return None
 
@@ -232,6 +240,13 @@ def process_recording(
     context_md = _load_context_md()
 
     # Step 6: Summarize with Claude
+    #
+    # summarize() itself raises RuntimeError for backend failures (both Claude
+    # and Ollama retries exhausted). ValueError surfaces from the model config
+    # path. We catch those and save the raw transcript without a summary —
+    # strictly better than losing the recording. Unexpected programming
+    # errors (TypeError, AttributeError) intentionally propagate so they're
+    # not swallowed by this catch-and-continue.
     summary = None
     try:
         summary = summarize(
@@ -240,17 +255,18 @@ def process_recording(
             metadata=metadata,
         )
         logger.info("Summarization done: title=%r", summary.title)
-    except Exception as e:  # noqa: BLE001
+    except (RuntimeError, ValueError) as e:
         logger.error(
             "Summarization failed (will save transcript without summary): %s", e
         )
-        # Intentionally continue — a raw transcript is better than nothing
 
     # Step 7: Format the markdown content
     title = (summary.title if summary else None) or metadata.get(
         "title", f"{source.title()} Meeting"
     )
 
+    # format_transcript is pure string-building; ValueError is the realistic
+    # failure mode (bad date/time parse, unicode issue in a field).
     try:
         md_content = format_transcript(
             transcription=transcription,
@@ -260,7 +276,7 @@ def process_recording(
             date_str=date_str,
             time_str=time_str,
         )
-    except Exception as e:  # noqa: BLE001
+    except (ValueError, AttributeError) as e:
         logger.error("Formatter failed: %s", e)
         return None
 
@@ -303,7 +319,10 @@ def process_recording(
             count,
             retain,
         )
-    except Exception as e:  # noqa: BLE001
+    except OSError as e:
+        # State-update failures (disk full, permission denied, etc.) are
+        # logged but must not undo the already-written transcript. The
+        # retention + counter will be slightly stale until the next write.
         logger.error("Failed to update state (non-fatal): %s", e)
 
     logger.info("=== Pipeline complete: %s ===", out_path)

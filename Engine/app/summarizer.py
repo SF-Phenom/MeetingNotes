@@ -223,7 +223,17 @@ def _summarize_claude(
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.error("Failed to parse Claude response as JSON: %s", e)
             last_error = e
-        except Exception as e:
+        except anthropic.APIError as e:
+            # Covers APIConnectionError, APIStatusError, RateLimitError,
+            # InternalServerError, etc. — the anthropic SDK's top-level base
+            # for everything that could reasonably be retried. Programming
+            # errors (TypeError, AttributeError) are intentionally NOT caught
+            # so they surface loudly in logs instead of being silently retried
+            # three times and then wrapped in a generic "Claude failed"
+            # RuntimeError.
+            last_error = e
+        except (TimeoutError, ConnectionError, OSError) as e:
+            # Network layer below the SDK.
             last_error = e
 
     raise RuntimeError(
@@ -306,10 +316,12 @@ def _summarize_ollama(
             logger.error("Failed to parse Ollama response as JSON: %s", e)
             logger.debug("Raw Ollama response: %s", raw_text[:1000] if raw_text else "(empty)")
             last_error = e
-        except (urllib.error.URLError, OSError) as e:
+        except (urllib.error.URLError, OSError, TimeoutError, ConnectionError) as e:
+            # Transport-level failures: network down, Ollama not running,
+            # request timeout. Transient — worth retrying.
+            # Programming errors (TypeError, AttributeError) are not caught
+            # so they surface as crashes rather than silent retries.
             logger.error("Ollama request failed: %s", e)
-            last_error = e
-        except Exception as e:
             last_error = e
 
     raise RuntimeError(
@@ -345,17 +357,21 @@ def summarize(
         return _summarize_claude(transcript_text, context_md, metadata)
 
     if pref == "automatic":
-        # Try Claude first
+        # Automatic mode's whole point is to fall back to Ollama on ANY Claude
+        # failure — missing API key, expired key, out of credits, network
+        # issue, even a schema-mismatch RuntimeError from _summarize_claude's
+        # retry loop. A broad `except Exception` here is intentional. Same
+        # for the outer catch: if Ollama ALSO fails, we raise a composite
+        # error rather than picking one.
         try:
             return _summarize_claude(transcript_text, context_md, metadata)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — intentional fallback trigger
             logger.warning(
                 "Claude failed in automatic mode, falling back to Ollama: %s", e
             )
-            # Fall through to Ollama
             try:
                 return _summarize_ollama(transcript_text, context_md, metadata)
-            except Exception as ollama_err:
+            except Exception as ollama_err:  # noqa: BLE001 — composite report
                 raise RuntimeError(
                     f"Both Claude and Ollama failed. "
                     f"Claude: {e} | Ollama: {ollama_err}"

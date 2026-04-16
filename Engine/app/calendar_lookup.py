@@ -49,11 +49,13 @@ def _get_credentials():
 
     creds = None
 
-    # Load saved token if it exists
+    # Load saved token if it exists. Broad catch: google.auth raises
+    # ValueError, json.JSONDecodeError, and its own auth exceptions depending
+    # on corruption mode. Any of them mean the same thing for us — re-auth.
     if os.path.exists(TOKEN_PATH):
         try:
             creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — all failures mean re-auth
             logger.warning("Could not load saved token (%s); will re-authenticate.", e)
             creds = None
 
@@ -66,7 +68,7 @@ def _get_credentials():
             creds.refresh(Request())
             _save_token(creds)
             return creds
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — google.auth raises many types
             logger.warning(
                 "Token refresh failed (%s); deleting stale token and re-authenticating.", e
             )
@@ -90,7 +92,7 @@ def _get_credentials():
         creds = flow.run_local_server(port=0)
         _save_token(creds)
         return creds
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — OAuth errors are diverse; disable on any
         logger.error("OAuth flow failed: %s", e)
         return None
 
@@ -166,12 +168,15 @@ def lookup_meeting(
     try:
         service = build("calendar", "v3", credentials=creds)
 
-        # Determine the user's own email to filter from attendees
+        # Determine the user's own email to filter from attendees.
+        # googleapiclient raises HttpError + transport errors; broad catch
+        # is intentional since missing own_email is harmless (attendee filter
+        # just becomes a no-op).
         own_email: str | None = None
         try:
             cal_info = service.calendars().get(calendarId="primary").execute()
-            own_email = cal_info.get("id")  # primary calendar id is the user's email
-        except Exception as e:  # noqa: BLE001
+            own_email = cal_info.get("id")
+        except Exception as e:  # noqa: BLE001 — degrade gracefully
             logger.warning("Could not determine user's email: %s", e)
 
         result = (
@@ -185,7 +190,7 @@ def lookup_meeting(
             )
             .execute()
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — Google API failures disable enrichment
         logger.error("Google Calendar API call failed: %s", e)
         return None
 
@@ -289,7 +294,7 @@ def enrich_metadata(wav_path: str) -> dict:
 
     try:
         cal_match = lookup_meeting(date_str, time_str)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — enrichment is non-fatal; any error is OK
         logger.warning("Calendar lookup raised an unexpected error: %s", e)
         cal_match = None
 

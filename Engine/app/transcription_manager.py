@@ -26,7 +26,7 @@ from typing import Callable
 
 from app import pipeline
 from app import checkin
-from app.realtime_transcriber import RealtimeTranscriber
+from app.transcription_engine import RealtimeEngine, get_realtime_engine
 from app.ui_bridge import UIBridge
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ class TranscriptionManager:
         self._rebuild_menu = rebuild_menu
         self._notify = notify
 
-        self._realtime: RealtimeTranscriber | None = None
+        self._realtime: RealtimeEngine | None = None
         self._lock = threading.Lock()
         self._transcribing = False
 
@@ -61,7 +61,7 @@ class TranscriptionManager:
         start (batch transcription is still usable in that case).
         """
         try:
-            rt = RealtimeTranscriber()
+            rt = get_realtime_engine()
             rt.start(wav_path)
             self._realtime = rt
             logger.info("Realtime transcriber started")
