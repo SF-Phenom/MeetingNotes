@@ -30,8 +30,8 @@ from app import recorder
 from app import pipeline
 from app import checkin
 from app import cleanup
-from app import summarizer
 from app.call_detector_proxy import CallDetectorProxy
+from app.model_manager import ModelManager
 from app.realtime_transcriber import RealtimeTranscriber
 from app.ui_bridge import UIBridge
 
@@ -113,9 +113,9 @@ class MeetingNotesApp(rumps.App):
                 message="Grant Screen Recording in System Settings → Privacy.",
             ))
 
-        # Model selection
-        self._available_models: list[str] = []  # Ollama models discovered at startup
-        self._discover_models()
+        # Summarization model state (Ollama discovery, API key, preference).
+        self._model_manager = ModelManager()
+        self._model_manager.discover()
 
         # Build initial menu
         self._build_idle_menu()
@@ -199,7 +199,7 @@ class MeetingNotesApp(rumps.App):
         items.append(None)
 
         # API key status
-        if os.environ.get("ANTHROPIC_API_KEY"):
+        if self._model_manager.api_key_present():
             items.append(rumps.MenuItem("API Key \u2713"))
         else:
             items.append(
@@ -658,45 +658,29 @@ class MeetingNotesApp(rumps.App):
 
     # ── Model selection ────────────────────────────────────────────────────────
 
-    def _discover_models(self) -> None:
-        """Discover available Ollama models on startup."""
-        try:
-            self._available_models = summarizer.discover_ollama_models()
-            if self._available_models:
-                logger.info(
-                    "Ollama models available: %s", self._available_models
-                )
-            else:
-                logger.info("No Ollama models found (Ollama may not be running)")
-        except Exception as e:
-            logger.warning("Model discovery failed: %s", e)
-            self._available_models = []
-
     def _build_model_submenu(self) -> rumps.MenuItem:
-        """Build the 'Model' submenu with available options."""
-        current = summarizer.get_model_preference()
+        """Build the 'Model' submenu from ModelManager's plain-data API."""
+        current = self._model_manager.current_preference()
+        available = self._model_manager.available_models()
         submenu = rumps.MenuItem("Summarization Model")
 
-        # Automatic option
         auto_item = rumps.MenuItem(
             "Automatic (Claude → Local)" if current == "automatic"
             else "Automatic",
             callback=self._select_model,
         )
         if current == "automatic":
-            auto_item.state = 1  # checkmark
+            auto_item.state = 1
         submenu.add(auto_item)
 
-        # Claude option
         claude_item = rumps.MenuItem("Claude", callback=self._select_model)
         if current == "claude":
             claude_item.state = 1
         submenu.add(claude_item)
 
-        # Separator before local models
-        if self._available_models:
+        if available:
             submenu.add(None)
-            for model_name in self._available_models:
+            for model_name in available:
                 item = rumps.MenuItem(model_name, callback=self._select_model)
                 if current == model_name:
                     item.state = 1
@@ -705,7 +689,6 @@ class MeetingNotesApp(rumps.App):
             submenu.add(None)
             submenu.add(rumps.MenuItem("No local models found"))
 
-        # Refresh option
         submenu.add(None)
         submenu.add(
             rumps.MenuItem("Refresh Models", callback=self._refresh_models)
@@ -722,16 +705,14 @@ class MeetingNotesApp(rumps.App):
             preference = "claude"
         else:
             preference = title  # Ollama model name
-
-        summarizer.set_model_preference(preference)
-        logger.info("User selected model: %s", preference)
+        self._model_manager.set_preference(preference)
         self._build_idle_menu()
 
     def _refresh_models(self, _sender) -> None:
         """Re-scan for available Ollama models."""
-        self._discover_models()
+        self._model_manager.discover()
         self._build_idle_menu()
-        count = len(self._available_models)
+        count = len(self._model_manager.available_models())
         rumps.notification(
             title="MeetingNotes",
             subtitle="Models refreshed",
@@ -772,47 +753,17 @@ class MeetingNotesApp(rumps.App):
             dimensions=(320, 24),
         )
         response = window.run()
-
         if not response.clicked:
-            return  # user cancelled
-
-        api_key = response.text.strip()
-        if not api_key:
             return
 
-        if not api_key.startswith("sk-ant-"):
-            rumps.alert(
-                title="Invalid API Key",
-                message="The key should start with 'sk-ant-'. Please try again.",
-            )
+        ok, message = self._model_manager.save_api_key(response.text)
+        if not ok:
+            rumps.alert(title="Invalid API Key", message=message)
             return
-
-        # Save to environment for immediate use
-        os.environ["ANTHROPIC_API_KEY"] = api_key
-
-        # Persist to ~/.zshrc
-        try:
-            zshrc_path = os.path.expanduser("~/.zshrc")
-            # Remove any existing ANTHROPIC_API_KEY export line
-            lines = []
-            if os.path.exists(zshrc_path):
-                with open(zshrc_path, "r") as f:
-                    lines = [l for l in f.readlines()
-                             if not l.lstrip().startswith("export ANTHROPIC_API_KEY=")]
-            lines.append('export ANTHROPIC_API_KEY="{}"\n'.format(api_key))
-            # Atomic write: temp file then rename
-            tmp_path = zshrc_path + ".tmp"
-            with open(tmp_path, "w") as f:
-                f.writelines(lines)
-            os.rename(tmp_path, zshrc_path)
-            logger.info("API key saved to ~/.zshrc")
-        except OSError as e:
-            logger.error("Failed to save API key to ~/.zshrc: %s", e)
-
         rumps.notification(
             title="MeetingNotes",
             subtitle="API key saved",
-            message="Claude summarization is now active.",
+            message=message,
         )
         self._build_idle_menu()
 
