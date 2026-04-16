@@ -14,7 +14,6 @@ import logging
 import logging.handlers
 import os
 import sys
-import threading
 import time
 
 import rumps
@@ -34,6 +33,7 @@ from app.model_manager import ModelManager
 from app.orchestrator import CallOrchestrator
 from app.transcription_manager import TranscriptionManager
 from app.ui_bridge import UIBridge
+from app.update_checker import UpdateChecker
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 
@@ -109,6 +109,17 @@ class MeetingNotesApp(rumps.App):
             rebuild_menu=self._build_idle_menu,
             notify=self._show_notification,
             debounce_ticks=CALL_END_DEBOUNCE,
+        )
+
+        # Git-based update check. Owns its own threading; we inject main-
+        # thread callbacks for every UI step.
+        self._update_checker = UpdateChecker(
+            base_dir=_BASE_DIR,
+            ui_bridge=self._ui_bridge,
+            notify=self._show_notification,
+            prompt_install=self._prompt_update_install,
+            show_alert=self._show_update_alert,
+            restart=self._restart_after_update,
         )
 
         # Probe Screen Recording permission once at startup. If denied, the
@@ -590,59 +601,12 @@ class MeetingNotesApp(rumps.App):
     # ── Utilities ──────────────────────────────────────────────────────────────
 
     def _check_for_updates(self, _sender) -> None:
-        """Check GitHub for updates and offer to install them."""
-        threading.Thread(
-            target=self._run_update_check, daemon=True
-        ).start()
-
-    def _run_update_check(self) -> None:
-        """Background thread: fetch from origin and compare.
-
-        All UI interaction is marshalled back to the main thread via
-        self._ui_bridge — rumps.alert/notification from a bg thread is unsafe.
-        """
-        import subprocess as sp
-
-        try:
-            sp.run(
-                ["git", "-C", _BASE_DIR, "fetch"],
-                capture_output=True, timeout=30,
-            )
-            local = sp.run(
-                ["git", "-C", _BASE_DIR, "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip()
-            # Get current branch name
-            branch = sp.run(
-                ["git", "-C", _BASE_DIR, "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip() or "main"
-            remote = sp.run(
-                ["git", "-C", _BASE_DIR, "rev-parse", f"origin/{branch}"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip()
-        except Exception as e:
-            logger.error("Update check failed: %s", e)
-            self._ui_bridge.dispatch(lambda: rumps.notification(
-                title="MeetingNotes",
-                subtitle="Update check failed",
-                message="Could not reach GitHub. Check your internet connection.",
-            ))
-            return
-
-        if local == remote:
-            self._ui_bridge.dispatch(lambda: rumps.notification(
-                title="MeetingNotes",
-                subtitle="Up to date",
-                message="You're running the latest version.",
-            ))
-            return
-
-        # Update available — show the install prompt on the main thread.
-        self._ui_bridge.dispatch(self._prompt_update_install)
+        """'Check for Updates' menu click — kick off the background check."""
+        self._update_checker.check()
 
     def _prompt_update_install(self) -> None:
-        """Main thread: ask the user whether to install; spawn pull on yes."""
+        """Main-thread install prompt. Called by UpdateChecker when new
+        commits are available on origin."""
         response = rumps.alert(
             title="Update Available",
             message=(
@@ -653,37 +617,15 @@ class MeetingNotesApp(rumps.App):
             cancel="Later",
         )
         if response == 1:  # "Install" clicked
-            threading.Thread(target=self._run_update_apply, daemon=True).start()
+            self._update_checker.apply()
 
-    def _run_update_apply(self) -> None:
-        """Background thread: git pull; dispatch result UI back to main."""
-        import subprocess as sp
-
-        try:
-            result = sp.run(
-                ["git", "-C", _BASE_DIR, "pull", "--ff-only"],
-                capture_output=True, text=True, timeout=60,
-            )
-            if result.returncode != 0:
-                logger.error("git pull failed: %s", result.stderr)
-                self._ui_bridge.dispatch(lambda: rumps.alert(
-                    title="Update Failed",
-                    message="Could not pull updates. Check Engine/logs/app.log for details.",
-                ))
-                return
-        except Exception as e:
-            logger.error("Update pull failed: %s", e)
-            err_msg = str(e)
-            self._ui_bridge.dispatch(lambda: rumps.alert(
-                title="Update Failed", message=err_msg,
-            ))
-            return
-
-        logger.info("Update applied, restarting app")
-        self._ui_bridge.dispatch(self._restart_after_update)
+    def _show_update_alert(self, title: str, message: str) -> None:
+        """Main-thread rumps.alert shim injected into UpdateChecker."""
+        rumps.alert(title=title, message=message)
 
     def _restart_after_update(self) -> None:
-        """Main thread: show 'installed' notification, relaunch, and quit."""
+        """Main-thread post-update relaunch. Spawned by UpdateChecker when
+        git pull succeeds."""
         import subprocess as sp
 
         rumps.notification(
