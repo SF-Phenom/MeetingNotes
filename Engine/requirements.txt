@@ -1,6 +1,10 @@
-rumps>=0.4.0
-psutil>=5.9.0
-anthropic>=0.39.0
-google-auth-oauthlib>=1.0.0
-google-api-python-client>=2.0.0
-parakeet-mlx>=0.1.0
+rumps==0.4.0
+psutil==7.2.2
+anthropic==0.91.0
+google-auth-oauthlib==1.3.1
+google-api-python-client==2.193.0
+parakeet-mlx==0.5.1
+
+# Test dependencies
+pytest==9.0.3
+pytest-cov==7.1.0
