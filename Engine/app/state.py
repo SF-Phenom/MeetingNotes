@@ -2,24 +2,27 @@
 State management for MeetingNotes.
 Manages Engine/state.json with atomic, file-locked writes.
 
-state.json schema:
-{
-  "transcripts_since_checkin": int,
-  "last_checkin_date": str|null,
-  "suppressed_sources": [str],
-  "pending_deletion": [{"path": str, "recorded_date": str}],
-  "retain_recordings": bool,
-  "recording_active": bool,
-  "active_recording_path": str|null,
-  "active_call_url": str|null,
-  "active_call_source": str|null,
-}
+Two complementary APIs:
+
+  Dict API (original):
+    ``load()`` returns a dict, ``update(**kwargs)`` merges keyword args.
+    Still used by most existing callers.
+
+  Typed API (``State`` dataclass):
+    ``State.load()`` returns a frozen dataclass with attribute access.
+    Preferred for new code — the schema is checked at definition time
+    and IDEs can autocomplete field names. Both APIs write to the same
+    state.json and either may be used interchangeably. See the ``State``
+    docstring for the authoritative field list.
 """
+
+from __future__ import annotations
 
 import fcntl
 import json
-import os
 import logging
+import os
+from dataclasses import dataclass, field, fields
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,42 @@ DONE_DIR = os.path.join(ENGINE_DIR, "recordings", "done")
 TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
 CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
 
+@dataclass(frozen=True)
+class State:
+    """Typed view of state.json. Frozen — use update() to mutate on disk.
+
+    Field list is the authoritative schema. Defaults here mirror
+    ``DEFAULT_STATE`` below so the two can't drift.
+    """
+
+    transcripts_since_checkin: int = 0
+    last_checkin_date: str | None = None
+    suppressed_sources: list[str] = field(default_factory=list)
+    pending_deletion: list[dict] = field(default_factory=list)
+    retain_recordings: bool = False
+    recording_active: bool = False
+    active_recording_path: str | None = None
+    active_call_url: str | None = None
+    active_call_source: str | None = None
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "State":
+        """Build a State from an arbitrary dict, using defaults for missing
+        fields and silently ignoring unknown ones (keeps forward-compat with
+        state files written by future versions)."""
+        known = {f.name for f in fields(cls)}
+        kwargs = {k: v for k, v in raw.items() if k in known}
+        return cls(**kwargs)
+
+    @classmethod
+    def load(cls) -> "State":
+        """Read state.json and return a typed State."""
+        return cls.from_raw(load())
+
+
+# Dict of default values — kept in sync with State's field defaults by the
+# test suite. Historical callers use ``load().get(key, default)`` patterns,
+# so this continues to exist for back-compat.
 DEFAULT_STATE = {
     "transcripts_since_checkin": 0,
     "last_checkin_date": None,
