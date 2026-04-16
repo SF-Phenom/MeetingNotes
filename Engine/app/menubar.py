@@ -27,12 +27,11 @@ if _ENGINE_DIR not in sys.path:
 
 from app import state as state_mod
 from app import recorder
-from app import pipeline
 from app import checkin
 from app import cleanup
 from app.call_detector_proxy import CallDetectorProxy
 from app.model_manager import ModelManager
-from app.realtime_transcriber import RealtimeTranscriber
+from app.transcription_manager import TranscriptionManager
 from app.ui_bridge import UIBridge
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
@@ -84,12 +83,8 @@ class MeetingNotesApp(rumps.App):
         # recordable call is seen; cleared by the user action menu items or
         # when the call goes away. Shape: {"source": str, "url": str|None}.
         self._pending_call_prompt: dict | None = None
-        self._transcribing: bool = False  # True while background transcription runs
         self._checkin_due: bool = False  # True when check-in threshold is reached
         self._no_call_count: int = 0  # Consecutive "no call detected" ticks for debounce
-
-        # Realtime transcription
-        self._realtime_transcriber: RealtimeTranscriber | None = None
 
         # Call-detection worker — a separate process that runs osascript/psutil
         # calls so the main process (which hosts MLX GPU threads) never forks
@@ -99,6 +94,15 @@ class MeetingNotesApp(rumps.App):
 
         # Main-thread dispatch for rumps UI updates from background threads.
         self._ui_bridge = UIBridge()
+
+        # Owns realtime + batch transcription threads and the is_transcribing
+        # flag. rumps-free by design; we inject the notification callback so
+        # it doesn't need to import rumps.
+        self._transcription = TranscriptionManager(
+            ui_bridge=self._ui_bridge,
+            rebuild_menu=self._build_idle_menu,
+            notify=self._show_notification,
+        )
 
         # Probe Screen Recording permission once at startup. If denied, the
         # menubar surfaces a persistent item with a link to System Settings
@@ -154,7 +158,7 @@ class MeetingNotesApp(rumps.App):
             ))
             items.append(None)
 
-        if self._transcribing:
+        if self._transcription.is_transcribing:
             items.append(rumps.MenuItem("Transcribing..."))
         elif pending_count > 0:
             items.append(
@@ -225,7 +229,7 @@ class MeetingNotesApp(rumps.App):
         self.menu = items
 
         # Icon priority: transcribing > check-in due > pending recordings > idle
-        if self._transcribing:
+        if self._transcription.is_transcribing:
             self.title = ICON_TRANSCRIBING
         elif self._checkin_due:
             self.title = ICON_CHECKIN
@@ -244,7 +248,7 @@ class MeetingNotesApp(rumps.App):
         ]
 
         # Show "View Live Transcript" if realtime transcription is active
-        if self._realtime_transcriber and self._realtime_transcriber.live_transcript_path:
+        if self._transcription.realtime_live_transcript_path:
             items.append(
                 rumps.MenuItem(
                     "View Live Transcript",
@@ -441,14 +445,7 @@ class MeetingNotesApp(rumps.App):
             if url:
                 state_mod.update(active_call_url=url)
 
-            # Start realtime transcription
-            try:
-                self._realtime_transcriber = RealtimeTranscriber()
-                self._realtime_transcriber.start(path)
-                logger.info("Realtime transcriber started")
-            except Exception as e:
-                logger.error("Failed to start realtime transcriber: %s", e, exc_info=True)
-                self._realtime_transcriber = None
+            self._transcription.start_realtime(path)
 
             self._build_recording_menu(source, "0:00")
             logger.info("Recording started: path=%s", path)
@@ -462,18 +459,7 @@ class MeetingNotesApp(rumps.App):
     def _do_stop_recording(self, notify: bool = False) -> None:
         """Stop recording and update the UI, then auto-transcribe."""
         try:
-            # Stop realtime transcriber first (if running) to get accumulated text
-            realtime_text = None
-            if self._realtime_transcriber:
-                try:
-                    realtime_text = self._realtime_transcriber.stop()
-                    logger.info(
-                        "Realtime transcriber stopped, got %d chars",
-                        len(realtime_text) if realtime_text else 0,
-                    )
-                except Exception as e:
-                    logger.error("Error stopping realtime transcriber: %s", e)
-                self._realtime_transcriber = None
+            realtime_text = self._transcription.stop_realtime()
 
             queue_path = recorder.stop_recording()
             self._recording_start = None
@@ -485,11 +471,9 @@ class MeetingNotesApp(rumps.App):
                     subtitle="Recording saved — transcribing...",
                     message=os.path.basename(queue_path),
                 )
-            # Auto-transcribe the recording that just finished
             if queue_path:
-                self._transcribe_in_background(
-                    [queue_path],
-                    pre_transcribed_text=realtime_text,
+                self._transcription.submit(
+                    [queue_path], pre_transcribed_text=realtime_text,
                 )
         except Exception as e:
             logger.error("Failed to stop recording: %s", e, exc_info=True)
@@ -511,12 +495,10 @@ class MeetingNotesApp(rumps.App):
     def _quit(self, _sender) -> None:
         """Quit menu item — stop recording cleanly before exiting."""
         logger.info("Quit requested")
-        if self._realtime_transcriber:
-            try:
-                self._realtime_transcriber.stop()
-            except Exception as e:
-                logger.error("Error stopping realtime transcriber on quit: %s", e)
-            self._realtime_transcriber = None
+        try:
+            self._transcription.shutdown()
+        except Exception as e:
+            logger.error("Error shutting down transcription manager: %s", e)
         if recorder.is_recording():
             logger.info("Stopping active recording before quit")
             try:
@@ -570,80 +552,7 @@ class MeetingNotesApp(rumps.App):
                 message="No recordings to transcribe.",
             )
             return
-        self._transcribe_in_background(wav_files)
-
-    def _transcribe_in_background(
-        self,
-        wav_paths: list[str],
-        pre_transcribed_text: str | None = None,
-    ) -> None:
-        """Run transcription in a background thread so the UI stays responsive."""
-        if self._transcribing:
-            logger.warning("Transcription already in progress, skipping")
-            return
-
-        self._transcribing = True
-        self._build_idle_menu()
-
-        def _worker():
-            succeeded = 0
-            failed = 0
-            last_path = None
-            try:
-                for i, wav_path in enumerate(wav_paths):
-                    try:
-                        logger.info("Transcribing: %s", os.path.basename(wav_path))
-                        # Only the first file gets pre-transcribed text (from realtime)
-                        pre_text = pre_transcribed_text if i == 0 else None
-                        result = pipeline.process_recording(
-                            wav_path, pre_transcribed_text=pre_text
-                        )
-                        if result:
-                            succeeded += 1
-                            last_path = result
-                        else:
-                            failed += 1
-                    except Exception as e:
-                        logger.error("Pipeline error for %s: %s", wav_path, e, exc_info=True)
-                        failed += 1
-            finally:
-                # Always clear the transcribing flag — a hang here used to wedge
-                # the flag permanently and block future transcriptions.
-                self._transcribing = False
-
-            # Marshal all UI updates back onto the main thread.
-            self._ui_bridge.dispatch(self._build_idle_menu)
-
-            if succeeded > 0:
-                subtitle = "{} transcript{} ready".format(
-                    succeeded, "s" if succeeded > 1 else ""
-                )
-                message = os.path.basename(last_path) if last_path else ""
-                self._ui_bridge.dispatch(lambda: rumps.notification(
-                    title="MeetingNotes",
-                    subtitle=subtitle,
-                    message=message,
-                ))
-            if failed > 0:
-                failed_msg = "{} recording{} failed — check logs".format(
-                    failed, "s" if failed > 1 else ""
-                )
-                self._ui_bridge.dispatch(lambda: rumps.notification(
-                    title="MeetingNotes",
-                    subtitle="Transcription errors",
-                    message=failed_msg,
-                ))
-
-            # Check if a check-in is now due after new transcripts.
-            if succeeded > 0 and checkin.should_trigger_checkin():
-                self._ui_bridge.dispatch(lambda: rumps.notification(
-                    title="MeetingNotes",
-                    subtitle="Check-in ready",
-                    message="You have enough new transcripts for a project check-in.",
-                ))
-
-        thread = threading.Thread(target=_worker, daemon=True)
-        thread.start()
+        self._transcription.submit(wav_files)
 
     @staticmethod
     def _list_queued_recordings() -> list[str]:
@@ -725,12 +634,20 @@ class MeetingNotesApp(rumps.App):
 
     def _open_live_transcript(self, _sender) -> None:
         """Open the live transcript file in the default text editor."""
-        if not self._realtime_transcriber or not self._realtime_transcriber.live_transcript_path:
-            return
-        path = self._realtime_transcriber.live_transcript_path
-        if os.path.exists(path):
+        path = self._transcription.realtime_live_transcript_path
+        if path and os.path.exists(path):
             import subprocess as sp
             sp.Popen(["open", path])
+
+    # ── Notification helper (injected into TranscriptionManager) ──────────────
+
+    def _show_notification(self, subtitle: str, message: str) -> None:
+        """Main-thread-safe rumps.notification with MeetingNotes title."""
+        rumps.notification(
+            title="MeetingNotes",
+            subtitle=subtitle,
+            message=message,
+        )
 
     # ── Retain recordings toggle ────────────────────────────────────────────────
 
