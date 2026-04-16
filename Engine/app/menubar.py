@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
-import queue
 import sys
 import threading
 import time
@@ -34,6 +33,7 @@ from app import cleanup
 from app import summarizer
 from app.call_detector_proxy import CallDetectorProxy
 from app.realtime_transcriber import RealtimeTranscriber
+from app.ui_bridge import UIBridge
 
 # ─── Logging setup ────────────────────────────────────────────────────────────
 
@@ -97,11 +97,8 @@ class MeetingNotesApp(rumps.App):
         self._call_detector = CallDetectorProxy()
         self._call_detector.start()
 
-        # Main-thread UI dispatch queue. Background threads push callables here;
-        # the @rumps.timer(0.1) _ui_drain_tick drains them on the main thread.
-        # rumps/AppKit is not thread-safe — any rumps.notification/alert/menu
-        # mutation from a non-main thread must go through this queue.
-        self._ui_queue: queue.Queue = queue.Queue()
+        # Main-thread dispatch for rumps UI updates from background threads.
+        self._ui_bridge = UIBridge()
 
         # Probe Screen Recording permission once at startup. If denied, the
         # menubar surfaces a persistent item with a link to System Settings
@@ -110,7 +107,7 @@ class MeetingNotesApp(rumps.App):
         if not self._screen_recording_ok:
             # Queue a one-time notification — the drain timer fires once the
             # rumps runloop is active so it'll pop shortly after launch.
-            self._ui_dispatch(lambda: rumps.notification(
+            self._ui_bridge.dispatch(lambda: rumps.notification(
                 title="MeetingNotes",
                 subtitle="System audio unavailable",
                 message="Grant Screen Recording in System Settings → Privacy.",
@@ -264,22 +261,10 @@ class MeetingNotesApp(rumps.App):
 
     # ── Main-thread UI dispatch ───────────────────────────────────────────────
 
-    def _ui_dispatch(self, fn) -> None:
-        """Schedule `fn` to run on the main rumps thread on the next drain tick."""
-        self._ui_queue.put(fn)
-
     @rumps.timer(0.1)
     def _ui_drain_tick(self, _sender) -> None:
         """Drain all pending UI callables on the main thread."""
-        while True:
-            try:
-                fn = self._ui_queue.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                fn()
-            except Exception as e:
-                logger.error("UI queue callable raised: %s", e, exc_info=True)
+        self._ui_bridge.drain()
 
     # ── Timers ────────────────────────────────────────────────────────────────
 
@@ -627,14 +612,14 @@ class MeetingNotesApp(rumps.App):
                 self._transcribing = False
 
             # Marshal all UI updates back onto the main thread.
-            self._ui_dispatch(self._build_idle_menu)
+            self._ui_bridge.dispatch(self._build_idle_menu)
 
             if succeeded > 0:
                 subtitle = "{} transcript{} ready".format(
                     succeeded, "s" if succeeded > 1 else ""
                 )
                 message = os.path.basename(last_path) if last_path else ""
-                self._ui_dispatch(lambda: rumps.notification(
+                self._ui_bridge.dispatch(lambda: rumps.notification(
                     title="MeetingNotes",
                     subtitle=subtitle,
                     message=message,
@@ -643,7 +628,7 @@ class MeetingNotesApp(rumps.App):
                 failed_msg = "{} recording{} failed — check logs".format(
                     failed, "s" if failed > 1 else ""
                 )
-                self._ui_dispatch(lambda: rumps.notification(
+                self._ui_bridge.dispatch(lambda: rumps.notification(
                     title="MeetingNotes",
                     subtitle="Transcription errors",
                     message=failed_msg,
@@ -651,7 +636,7 @@ class MeetingNotesApp(rumps.App):
 
             # Check if a check-in is now due after new transcripts.
             if succeeded > 0 and checkin.should_trigger_checkin():
-                self._ui_dispatch(lambda: rumps.notification(
+                self._ui_bridge.dispatch(lambda: rumps.notification(
                     title="MeetingNotes",
                     subtitle="Check-in ready",
                     message="You have enough new transcripts for a project check-in.",
@@ -853,7 +838,7 @@ class MeetingNotesApp(rumps.App):
         """Background thread: fetch from origin and compare.
 
         All UI interaction is marshalled back to the main thread via
-        _ui_dispatch — rumps.alert/notification from a bg thread is unsafe.
+        self._ui_bridge — rumps.alert/notification from a bg thread is unsafe.
         """
         import subprocess as sp
 
@@ -877,7 +862,7 @@ class MeetingNotesApp(rumps.App):
             ).stdout.strip()
         except Exception as e:
             logger.error("Update check failed: %s", e)
-            self._ui_dispatch(lambda: rumps.notification(
+            self._ui_bridge.dispatch(lambda: rumps.notification(
                 title="MeetingNotes",
                 subtitle="Update check failed",
                 message="Could not reach GitHub. Check your internet connection.",
@@ -885,7 +870,7 @@ class MeetingNotesApp(rumps.App):
             return
 
         if local == remote:
-            self._ui_dispatch(lambda: rumps.notification(
+            self._ui_bridge.dispatch(lambda: rumps.notification(
                 title="MeetingNotes",
                 subtitle="Up to date",
                 message="You're running the latest version.",
@@ -893,7 +878,7 @@ class MeetingNotesApp(rumps.App):
             return
 
         # Update available — show the install prompt on the main thread.
-        self._ui_dispatch(self._prompt_update_install)
+        self._ui_bridge.dispatch(self._prompt_update_install)
 
     def _prompt_update_install(self) -> None:
         """Main thread: ask the user whether to install; spawn pull on yes."""
@@ -920,7 +905,7 @@ class MeetingNotesApp(rumps.App):
             )
             if result.returncode != 0:
                 logger.error("git pull failed: %s", result.stderr)
-                self._ui_dispatch(lambda: rumps.alert(
+                self._ui_bridge.dispatch(lambda: rumps.alert(
                     title="Update Failed",
                     message="Could not pull updates. Check Engine/logs/app.log for details.",
                 ))
@@ -928,13 +913,13 @@ class MeetingNotesApp(rumps.App):
         except Exception as e:
             logger.error("Update pull failed: %s", e)
             err_msg = str(e)
-            self._ui_dispatch(lambda: rumps.alert(
+            self._ui_bridge.dispatch(lambda: rumps.alert(
                 title="Update Failed", message=err_msg,
             ))
             return
 
         logger.info("Update applied, restarting app")
-        self._ui_dispatch(self._restart_after_update)
+        self._ui_bridge.dispatch(self._restart_after_update)
 
     def _restart_after_update(self) -> None:
         """Main thread: show 'installed' notification, relaunch, and quit."""
