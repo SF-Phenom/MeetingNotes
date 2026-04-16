@@ -31,6 +31,7 @@ from app import checkin
 from app import cleanup
 from app.call_detector_proxy import CallDetectorProxy
 from app.model_manager import ModelManager
+from app.orchestrator import CallOrchestrator
 from app.transcription_manager import TranscriptionManager
 from app.ui_bridge import UIBridge
 
@@ -77,14 +78,7 @@ class MeetingNotesApp(rumps.App):
 
         # Internal state
         self._recording_start: float | None = None
-        self._skipped_session: str | None = None  # source string of a skipped call
-        self._last_detected_source: str | None = None
-        # Non-blocking call-detected prompt. Populated by detection when a
-        # recordable call is seen; cleared by the user action menu items or
-        # when the call goes away. Shape: {"source": str, "url": str|None}.
-        self._pending_call_prompt: dict | None = None
         self._checkin_due: bool = False  # True when check-in threshold is reached
-        self._no_call_count: int = 0  # Consecutive "no call detected" ticks for debounce
 
         # Call-detection worker — a separate process that runs osascript/psutil
         # calls so the main process (which hosts MLX GPU threads) never forks
@@ -102,6 +96,19 @@ class MeetingNotesApp(rumps.App):
             ui_bridge=self._ui_bridge,
             rebuild_menu=self._build_idle_menu,
             notify=self._show_notification,
+        )
+
+        # Call-detection polling + record-prompt state machine. Separately
+        # testable; menubar provides action callbacks so the orchestrator
+        # never touches rumps directly.
+        self._orchestrator = CallOrchestrator(
+            call_detector=self._call_detector,
+            is_recording=recorder.is_recording,
+            start_recording=self._do_start_recording,
+            stop_recording=self._do_stop_recording,
+            rebuild_menu=self._build_idle_menu,
+            notify=self._show_notification,
+            debounce_ticks=CALL_END_DEBOUNCE,
         )
 
         # Probe Screen Recording permission once at startup. If denied, the
@@ -142,8 +149,9 @@ class MeetingNotesApp(rumps.App):
 
         # Non-blocking call-detected prompt (replaces the old rumps.alert
         # modal that froze the detection timer while shown).
-        if self._pending_call_prompt:
-            src = self._pending_call_prompt["source"]
+        prompt = self._orchestrator.pending_prompt
+        if prompt:
+            src = prompt["source"]
             items.append(rumps.MenuItem(
                 "🔴 Record {} call".format(src),
                 callback=self._accept_call_prompt,
@@ -274,14 +282,9 @@ class MeetingNotesApp(rumps.App):
 
     @rumps.timer(10)
     def _call_detection_tick(self, _sender) -> None:
-        """Poll for active calls every 10 seconds.
-
-        Detection runs via CallDetectorProxy in a separate process, so the
-        main process never forks while MLX GPU threads are active. There is
-        no need to skip detection during transcription anymore.
-        """
+        """Poll for active calls every 10 seconds. Delegates to CallOrchestrator."""
         try:
-            self._run_call_detection()
+            self._orchestrator.tick()
         except Exception as e:
             logger.error("Unhandled exception in call detection timer: %s", e, exc_info=True)
 
@@ -312,128 +315,18 @@ class MeetingNotesApp(rumps.App):
         except Exception as e:
             logger.error("Unhandled exception in elapsed timer: %s", e, exc_info=True)
 
-    # ── Call detection logic ───────────────────────────────────────────────────
-
-    def _run_call_detection(self) -> None:
-        currently_recording = recorder.is_recording()
-
-        # ── While recording: use lightweight process-alive check ──────
-        # The full detect_active_call() checks window titles and browser
-        # URLs, which fail during screenshare, minimized windows, etc.
-        # Once we're recording, we only care if the app is still running.
-        if currently_recording and self._last_detected_source is not None:
-            still_alive = self._call_detector.is_call_still_active(
-                self._last_detected_source
-            )
-            if still_alive:
-                self._no_call_count = 0
-            else:
-                self._no_call_count += 1
-                if self._no_call_count >= CALL_END_DEBOUNCE:
-                    logger.info(
-                        "Call app '%s' no longer running (%d consecutive misses), "
-                        "stopping recording",
-                        self._last_detected_source,
-                        self._no_call_count,
-                    )
-                    self._do_stop_recording(notify=True)
-                    self._no_call_count = 0
-                    self._last_detected_source = None
-                    self._skipped_session = None
-                else:
-                    logger.debug(
-                        "Call app not detected (%d/%d), waiting for debounce",
-                        self._no_call_count,
-                        CALL_END_DEBOUNCE,
-                    )
-            return
-
-        # ── Not recording: full detection for new calls ───────────────
-        detected = self._call_detector.detect_active_call()
-
-        if detected:
-            source = detected["source"]
-            url = detected.get("url")
-            logger.debug("Call detected: source=%s url=%s", source, url)
-            self._last_detected_source = source
-
-            # Check suppression
-            current_state = state_mod.load()
-            suppressed = current_state.get("suppressed_sources", [])
-            if source in suppressed:
-                logger.info("Source '%s' is suppressed, skipping prompt", source)
-                return
-
-            # Check if user already skipped this session
-            if self._skipped_session == source:
-                return
-
-            # Prompt already pending for this source — keep as-is (don't spam
-            # notifications on every 10s tick).
-            if (
-                self._pending_call_prompt is not None
-                and self._pending_call_prompt.get("source") == source
-            ):
-                return
-
-            logger.info("Call detected, offering record prompt: source=%s", source)
-            self._pending_call_prompt = {"source": source, "url": url}
-            self._build_idle_menu()
-            rumps.notification(
-                title="MeetingNotes",
-                subtitle="{} call detected".format(source),
-                message="Click the menubar icon to record.",
-            )
-
-        else:
-            # No call detected and not recording — reset state, including any
-            # pending prompt (the call went away before the user acted).
-            self._last_detected_source = None
-            self._skipped_session = None
-            if self._pending_call_prompt is not None:
-                logger.debug("Clearing stale call prompt — no call detected")
-                self._pending_call_prompt = None
-                self._build_idle_menu()
-
     # ── Call-prompt click handlers ─────────────────────────────────────────────
+    # Thin forwarders to CallOrchestrator — rumps needs the (self, sender)
+    # callback signature here.
 
     def _accept_call_prompt(self, _sender) -> None:
-        """User clicked 'Record <Source> call' in the menu."""
-        if not self._pending_call_prompt:
-            return
-        prompt = self._pending_call_prompt
-        self._pending_call_prompt = None
-        logger.info("User accepted call prompt: source=%s", prompt["source"])
-        self._do_start_recording(prompt["source"], prompt.get("url"))
+        self._orchestrator.accept_prompt()
 
     def _skip_call_prompt(self, _sender) -> None:
-        """User clicked 'Skip this call' in the menu."""
-        if not self._pending_call_prompt:
-            return
-        source = self._pending_call_prompt["source"]
-        self._pending_call_prompt = None
-        self._skipped_session = source
-        logger.info("User skipped call prompt: source=%s", source)
-        self._build_idle_menu()
+        self._orchestrator.skip_prompt()
 
     def _suppress_call_source(self, _sender) -> None:
-        """User clicked 'Never for <Source>' in the menu."""
-        if not self._pending_call_prompt:
-            return
-        source = self._pending_call_prompt["source"]
-        self._pending_call_prompt = None
-        current_state = state_mod.load()
-        suppressed = list(current_state.get("suppressed_sources", []))
-        if source not in suppressed:
-            suppressed.append(source)
-        state_mod.update(suppressed_sources=suppressed)
-        logger.info("User suppressed call source: %s", source)
-        self._build_idle_menu()
-        rumps.notification(
-            title="MeetingNotes",
-            subtitle="",
-            message="{} calls will no longer be detected.".format(source),
-        )
+        self._orchestrator.suppress_source()
 
     # ── Recording actions ──────────────────────────────────────────────────────
 
