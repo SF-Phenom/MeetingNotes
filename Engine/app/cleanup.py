@@ -16,6 +16,7 @@ import os
 from datetime import date, datetime, timedelta
 
 from . import state as state_mod
+from .recording_file import RecordingFile
 from .state import QUEUE_DIR, DONE_DIR
 
 logger = logging.getLogger(__name__)
@@ -24,34 +25,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _delete_file(path: str) -> bool:
-    """Delete a file if it exists. Returns True if a file was actually removed."""
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-            logger.info("Deleted: %s", path)
-            return True
-        except OSError as e:
-            logger.warning("Could not delete %s: %s", path, e)
-    return False
-
-
-def _delete_recording_and_sidecars(wav_path: str) -> int:
-    """
-    Delete a .wav file and any associated sidecar files (.meta.json, .srt).
-
-    Returns the number of files successfully deleted.
-    """
-    count = 0
-    base = os.path.splitext(wav_path)[0]
-
-    for path in (wav_path, base + ".meta.json", base + ".srt"):
-        if _delete_file(path):
-            count += 1
-
-    return count
-
 
 def _parse_recorded_date(date_str: str) -> date | None:
     """Parse a 'YYYY-MM-DD' string into a date object."""
@@ -106,7 +79,7 @@ def delete_old_recordings(max_age_days: int = 14) -> int:
                 recorded_date_str,
                 max_age_days,
             )
-            total_deleted += _delete_recording_and_sidecars(wav_path)
+            total_deleted += RecordingFile(wav_path).delete()
             # Entry is intentionally not added to remaining — it's been processed
         else:
             remaining.append(entry)
@@ -177,7 +150,7 @@ def scan_for_orphans(max_age_days: int = 14) -> int:
                     filename,
                     max_age_days,
                 )
-                total_deleted += _delete_recording_and_sidecars(wav_path)
+                total_deleted += RecordingFile(wav_path).delete()
 
     logger.info(
         "scan_for_orphans complete: %d orphaned file(s) deleted.", total_deleted

@@ -20,16 +20,16 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
 from datetime import datetime
 
 from . import state as state_mod
+from .audio_mixer import mix_to, system_path_for
 from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .formatter import format_transcript, slugify
+from .recording_file import RecordingFile
 from .summarizer import summarize
 from .transcriber import transcribe_with_parakeet
-from .audio_mixer import mix_to, system_path_for
 
 logger = logging.getLogger(__name__)
 
@@ -286,32 +286,16 @@ def process_recording(
             except OSError as e:
                 logger.warning("Could not delete mixed WAV %s: %s", mixed_wav_path, e)
 
+        recording = RecordingFile(wav_path)
         if retain:
-            # Move .wav (and sidecars) to done/ for 14-day retention
-            os.makedirs(DONE_DIR, exist_ok=True)
-            done_wav = os.path.join(DONE_DIR, os.path.basename(wav_path))
-            shutil.move(wav_path, done_wav)
-            if os.path.exists(sys_wav_path):
-                shutil.move(sys_wav_path,
-                            os.path.join(DONE_DIR, os.path.basename(sys_wav_path)))
-            base = os.path.splitext(wav_path)[0]
-            for ext in (".meta.json", ".srt"):
-                src = base + ext
-                if os.path.exists(src):
-                    shutil.move(src, os.path.join(DONE_DIR, os.path.basename(src)))
+            moved = recording.move_to(DONE_DIR)
             pending = list(current_state.get("pending_deletion", []))
-            # Deduplicate: don't add if this path is already pending
-            if not any(e.get("path") == done_wav for e in pending):
-                pending.append({"path": done_wav, "recorded_date": date_str})
+            if not any(e.get("path") == moved.wav_path for e in pending):
+                pending.append({"path": moved.wav_path, "recorded_date": date_str})
             state_updates["pending_deletion"] = pending
             logger.info("Retained recording in %s", DONE_DIR)
         else:
-            # Delete .wav and sidecars immediately
-            base = os.path.splitext(wav_path)[0]
-            for path in (wav_path, sys_wav_path, base + ".meta.json", base + ".srt"):
-                if os.path.exists(path):
-                    os.remove(path)
-                    logger.info("Deleted: %s", path)
+            recording.delete()
 
         state_mod.update(**state_updates)
         logger.info(

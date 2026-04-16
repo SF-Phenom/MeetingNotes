@@ -19,6 +19,7 @@ import threading
 from datetime import datetime
 
 from . import state as state_mod
+from .recording_file import RecordingFile
 from .state import BASE_DIR, ACTIVE_DIR, QUEUE_DIR
 
 logger = logging.getLogger(__name__)
@@ -258,31 +259,18 @@ def stop_recording() -> str | None:
     except OSError as e:
         logger.warning("Could not remove .lock file: %s", e)
 
-    # Move recording to queue (and its .sys.wav sibling, if any)
-    queue_path = None
+    # Move .wav + every sidecar (.sys.wav, .meta.json, etc.) to the queue dir
+    # as one atomic-looking unit.
+    queue_path: str | None = None
     if os.path.exists(active_path):
-        filename = os.path.basename(active_path)
-        queue_path = os.path.join(QUEUE_DIR, filename)
         try:
-            os.rename(active_path, queue_path)
+            moved = RecordingFile(active_path).move_to(QUEUE_DIR)
+            queue_path = moved.wav_path
             logger.info("Recording moved to queue: %s", queue_path)
         except OSError as e:
             logger.error("Failed to move recording to queue: %s", e)
-            queue_path = None
     else:
         logger.warning("Active recording file not found at: %s", active_path)
-
-    from .audio_mixer import system_path_for
-    active_sys_path = system_path_for(active_path)
-    if os.path.exists(active_sys_path):
-        queue_sys_path = system_path_for(
-            os.path.join(QUEUE_DIR, os.path.basename(active_path))
-        )
-        try:
-            os.rename(active_sys_path, queue_sys_path)
-            logger.info("System-audio track moved to queue: %s", queue_sys_path)
-        except OSError as e:
-            logger.error("Failed to move system-audio track to queue: %s", e)
 
     state_mod.update(
         recording_active=False,
@@ -344,19 +332,23 @@ def check_orphaned_recording() -> None:
         orphaned_pid,
     )
 
-    # Move all .wav files from active/ to queue/ (includes .sys.wav siblings)
+    # Move each orphaned recording (mic .wav plus every sidecar) to queue/.
+    # We iterate only mic .wav files so RecordingFile pulls its siblings
+    # along with it — previous code moved .wav files individually and
+    # dropped the .meta.json sidecar.
     moved = 0
     try:
         for fname in os.listdir(ACTIVE_DIR):
-            if fname.endswith(".wav"):
-                src = os.path.join(ACTIVE_DIR, fname)
-                dst = os.path.join(QUEUE_DIR, fname)
-                try:
-                    os.rename(src, dst)
-                    logger.info("Moved orphaned recording: %s -> %s", src, dst)
-                    moved += 1
-                except OSError as e:
-                    logger.error("Failed to move orphaned recording %s: %s", fname, e)
+            lower = fname.lower()
+            if not lower.endswith(".wav") or lower.endswith(".sys.wav"):
+                continue
+            src = os.path.join(ACTIVE_DIR, fname)
+            try:
+                RecordingFile(src).move_to(QUEUE_DIR)
+                logger.info("Moved orphaned recording: %s -> %s", src, QUEUE_DIR)
+                moved += 1
+            except OSError as e:
+                logger.error("Failed to move orphaned recording %s: %s", fname, e)
     except OSError as e:
         logger.error("Could not list active recordings directory: %s", e)
 
