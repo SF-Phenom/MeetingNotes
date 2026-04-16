@@ -29,6 +29,7 @@ from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .formatter import format_transcript, slugify
 from .summarizer import summarize
 from .transcriber import transcribe_with_parakeet
+from .audio_mixer import mix_to, system_path_for
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,28 @@ def process_recording(
     except Exception as e:  # noqa: BLE001
         logger.warning("Calendar enrichment failed (non-fatal): %s", e)
 
+    # If capture-audio produced a system-audio sibling track, mix it with
+    # the mic track before transcription. The realtime transcriber only saw
+    # the mic file, so its pre-transcribed text is incomplete when a system
+    # track exists — force re-transcription from the mixed WAV in that case.
+    sys_wav_path = system_path_for(wav_path)
+    mixed_wav_path: str | None = None
+    if os.path.exists(sys_wav_path):
+        mixed_wav_path = os.path.splitext(wav_path)[0] + ".mixed.wav"
+        try:
+            if mix_to(wav_path, sys_wav_path, mixed_wav_path):
+                logger.info("Mixed mic + system audio -> %s", os.path.basename(mixed_wav_path))
+                pre_transcribed_text = None  # re-transcribe the mix
+                transcribe_path = mixed_wav_path
+            else:
+                logger.warning("Audio mix failed, transcribing mic-only")
+                transcribe_path = wav_path
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Audio mix raised: %s — transcribing mic-only", e)
+            transcribe_path = wav_path
+    else:
+        transcribe_path = wav_path
+
     # Step 3 & 4: Transcribe (or use pre-transcribed text from realtime mode)
     transcription = None
     if pre_transcribed_text is not None:
@@ -195,7 +218,7 @@ def process_recording(
     else:
         try:
             logger.info("Transcribing with Parakeet")
-            transcription = transcribe_with_parakeet(wav_path)
+            transcription = transcribe_with_parakeet(transcribe_path)
             logger.info(
                 "Transcription done: %d chars, %d min",
                 len(transcription.plain_text),
@@ -256,16 +279,26 @@ def process_recording(
 
         state_updates: dict = {"transcripts_since_checkin": count}
 
+        # The mixed WAV is a derived artifact — always delete it.
+        if mixed_wav_path and os.path.exists(mixed_wav_path):
+            try:
+                os.remove(mixed_wav_path)
+            except OSError as e:
+                logger.warning("Could not delete mixed WAV %s: %s", mixed_wav_path, e)
+
         if retain:
             # Move .wav (and sidecars) to done/ for 14-day retention
             os.makedirs(DONE_DIR, exist_ok=True)
             done_wav = os.path.join(DONE_DIR, os.path.basename(wav_path))
             shutil.move(wav_path, done_wav)
+            if os.path.exists(sys_wav_path):
+                shutil.move(sys_wav_path,
+                            os.path.join(DONE_DIR, os.path.basename(sys_wav_path)))
             base = os.path.splitext(wav_path)[0]
             for ext in (".meta.json", ".srt"):
                 src = base + ext
                 if os.path.exists(src):
-                    shutil.move(src, os.path.join(done_dir, os.path.basename(src)))
+                    shutil.move(src, os.path.join(DONE_DIR, os.path.basename(src)))
             pending = list(current_state.get("pending_deletion", []))
             # Deduplicate: don't add if this path is already pending
             if not any(e.get("path") == done_wav for e in pending):
@@ -275,7 +308,7 @@ def process_recording(
         else:
             # Delete .wav and sidecars immediately
             base = os.path.splitext(wav_path)[0]
-            for path in (wav_path, base + ".meta.json", base + ".srt"):
+            for path in (wav_path, sys_wav_path, base + ".meta.json", base + ".srt"):
                 if os.path.exists(path):
                     os.remove(path)
                     logger.info("Deleted: %s", path)

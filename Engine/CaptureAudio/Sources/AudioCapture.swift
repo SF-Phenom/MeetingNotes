@@ -7,7 +7,8 @@ import ScreenCaptureKit
 
 final class AudioCaptureManager: NSObject, @unchecked Sendable {
 
-    private let wavWriter: WAVWriter
+    private let micWriter: WAVWriter
+    private let systemWriter: WAVWriter
     private var micEngine: AVAudioEngine?
     private var scStream: SCStream?
     private var streamDelegate: SystemAudioDelegate?
@@ -20,16 +21,19 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
         interleaved: true
     )!
 
-    // Serialises writes from both tap callbacks
-    private let writeLock = NSLock()
+    // Separate write locks — mic and system write to different files, no need
+    // to serialise across streams.
+    private let micWriteLock = NSLock()
+    private let systemWriteLock = NSLock()
 
     // Track whether system audio is delivering data (for diagnostics)
     private var systemAudioFrameCount: Int = 0
     private var systemAudioFormatLogged: Bool = false
     private var systemAudioCallbackCount: Int = 0
 
-    init(wavWriter: WAVWriter) {
-        self.wavWriter = wavWriter
+    init(micWriter: WAVWriter, systemWriter: WAVWriter) {
+        self.micWriter = micWriter
+        self.systemWriter = systemWriter
         super.init()
     }
 
@@ -154,89 +158,82 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
             return
         }
 
+        let srcSampleRate = asbd.pointee.mSampleRate
+        let srcChannels = Int(asbd.pointee.mChannelsPerFrame)
+        let srcBitsPerChannel = asbd.pointee.mBitsPerChannel
+        let flags = asbd.pointee.mFormatFlags
+        let srcIsFloat = (flags & kAudioFormatFlagIsFloat) != 0
+        let srcIsNonInterleaved = (flags & kAudioFormatFlagIsNonInterleaved) != 0
+
         // Log the audio format once so we can diagnose capture issues
         if !systemAudioFormatLogged {
-            let sr = asbd.pointee.mSampleRate
-            let ch = asbd.pointee.mChannelsPerFrame
-            let bpc = asbd.pointee.mBitsPerChannel
-            let isFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-            fputs("CaptureAudio: system audio format: \(sr) Hz, \(ch) ch, \(bpc)-bit \(isFloat ? "float" : "int")\n", stderr)
+            fputs("CaptureAudio: system audio format: \(srcSampleRate) Hz, \(srcChannels) ch, "
+                  + "\(srcBitsPerChannel)-bit \(srcIsFloat ? "float" : "int"), "
+                  + "\(srcIsNonInterleaved ? "planar" : "interleaved")\n", stderr)
             systemAudioFormatLogged = true
         }
-
         systemAudioCallbackCount += 1
 
-        // Get the raw audio data
-        guard let blockBuffer = sampleBuffer.dataBuffer else { return }
+        let frameCount = AVAudioFrameCount(sampleBuffer.numSamples)
+        guard frameCount > 0 else { return }
 
-        let length = CMBlockBufferGetDataLength(blockBuffer)
-        guard length > 0 else { return }
-
-        var dataPointer: UnsafeMutablePointer<Int8>?
-        var lengthOut: Int = 0
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
-            totalLengthOut: &lengthOut, dataPointerOut: &dataPointer
-        )
-        guard status == kCMBlockBufferNoErr, let ptr = dataPointer, lengthOut > 0 else {
-            return
-        }
-
-        let rawData = Data(bytes: ptr, count: lengthOut)
-
-        // The SCStream is configured for 16kHz mono, but the actual format
-        // may differ. Convert if needed.
-        let srcSampleRate = asbd.pointee.mSampleRate
-        let srcChannels = asbd.pointee.mChannelsPerFrame
-        let srcBitsPerChannel = asbd.pointee.mBitsPerChannel
-        let srcIsFloat = (asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-
-        // If format already matches our output (16kHz, mono, 16-bit int), write directly
-        if Int(srcSampleRate) == 16000 && srcChannels == 1 &&
-           srcBitsPerChannel == 16 && !srcIsFloat {
-            writeLock.lock()
-            wavWriter.write(rawData)
-            writeLock.unlock()
-            systemAudioFrameCount += lengthOut / 2
-            return
-        }
-
-        // Otherwise, use AVAudioConverter for format conversion
+        // Build an AVAudioFormat that matches the actual layout (planar vs
+        // interleaved). Copying planar data into a buffer declared as
+        // interleaved produces garbled audio — the bug that caused the
+        // "chipmunk" system-audio output.
         guard let srcFormat = AVAudioFormat(
             commonFormat: srcIsFloat ? .pcmFormatFloat32 : .pcmFormatInt16,
             sampleRate: srcSampleRate,
             channels: AVAudioChannelCount(srcChannels),
-            interleaved: true
+            interleaved: !srcIsNonInterleaved
         ) else { return }
 
         guard let converter = AVAudioConverter(from: srcFormat, to: outputFormat) else { return }
-
-        let frameCount = UInt32(lengthOut) / srcFormat.streamDescription.pointee.mBytesPerFrame
-        guard frameCount > 0 else { return }
-
         guard let srcBuffer = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
             return
         }
         srcBuffer.frameLength = frameCount
 
-        // Copy raw data into the source buffer
-        if srcIsFloat, let floatData = srcBuffer.floatChannelData {
-            rawData.withUnsafeBytes { rawBuf in
-                if let baseAddr = rawBuf.baseAddress {
-                    memcpy(floatData[0], baseAddr, lengthOut)
-                }
-            }
-        } else if let int16Data = srcBuffer.int16ChannelData {
-            rawData.withUnsafeBytes { rawBuf in
-                if let baseAddr = rawBuf.baseAddress {
-                    memcpy(int16Data[0], baseAddr, lengthOut)
-                }
-            }
-        } else {
-            return
+        // Pull the AudioBufferList from the CMSampleBuffer. For non-interleaved
+        // PCM the list has `srcChannels` buffers (one per channel). For
+        // interleaved it has a single buffer.
+        let ablSize = MemoryLayout<AudioBufferList>.size
+            + max(0, srcChannels - 1) * MemoryLayout<AudioBuffer>.size
+        let ablPtr = UnsafeMutableRawPointer.allocate(
+            byteCount: ablSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { ablPtr.deallocate() }
+        let ablTyped = ablPtr.assumingMemoryBound(to: AudioBufferList.self)
+
+        var blockBufferOut: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: ablTyped,
+            bufferListSize: ablSize,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBufferOut
+        )
+        guard status == noErr else { return }
+
+        let ablPointer = UnsafeMutableAudioBufferListPointer(ablTyped)
+        let dstList = UnsafeMutableAudioBufferListPointer(srcBuffer.mutableAudioBufferList)
+
+        // Copy each buffer (plane or interleaved blob) into the matching slot.
+        let planeCount = min(ablPointer.count, dstList.count)
+        for i in 0..<planeCount {
+            let src = ablPointer[i]
+            let dst = dstList[i]
+            guard let srcData = src.mData, let dstData = dst.mData else { continue }
+            let bytes = min(Int(src.mDataByteSize), Int(dst.mDataByteSize))
+            memcpy(dstData, srcData, bytes)
         }
 
-        convertAndWrite(buffer: srcBuffer, converter: converter)
+        convertAndWrite(buffer: srcBuffer, converter: converter,
+                        writer: systemWriter, lock: systemWriteLock)
         systemAudioFrameCount += Int(frameCount)
     }
 
@@ -255,7 +252,8 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
 
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
             guard let self else { return }
-            self.convertAndWrite(buffer: buffer, converter: converter)
+            self.convertAndWrite(buffer: buffer, converter: converter,
+                                 writer: self.micWriter, lock: self.micWriteLock)
         }
 
         try engine.start()
@@ -263,7 +261,10 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
 
     // MARK: - Conversion and Writing
 
-    private func convertAndWrite(buffer: AVAudioPCMBuffer, converter: AVAudioConverter) {
+    private func convertAndWrite(buffer: AVAudioPCMBuffer,
+                                 converter: AVAudioConverter,
+                                 writer: WAVWriter,
+                                 lock: NSLock) {
         let ratio = outputFormat.sampleRate / buffer.format.sampleRate
         let outFrameCapacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 1
 
@@ -291,9 +292,9 @@ final class AudioCaptureManager: NSObject, @unchecked Sendable {
         guard let channelData = outputBuffer.int16ChannelData else { return }
         let data = Data(bytes: channelData[0], count: Int(outputBuffer.frameLength) * 2)
 
-        writeLock.lock()
-        wavWriter.write(data)
-        writeLock.unlock()
+        lock.lock()
+        writer.write(data)
+        lock.unlock()
     }
 }
 

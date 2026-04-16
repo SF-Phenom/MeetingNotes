@@ -6,9 +6,11 @@ Future enhancements, roughly prioritized. Check items off as they're completed.
 
 ## Planned
 
-- [ ] **Post-transcription corrections dictionary** — `Settings/corrections.md` lets non-technical users add terms and find-and-replace pairs to fix systematic misrecognitions. Parsed by `Engine/app/corrections.py`, applied after transcript filtering in both batch and realtime paths.
+- [x] **Post-transcription corrections dictionary** — `Settings/corrections.md` lets non-technical users add terms and find-and-replace pairs to fix systematic misrecognitions. Parsed by `Engine/app/corrections.py`, applied after transcript filtering in both batch and realtime paths.
 
-- [ ] **Apple SpeechAnalyzer as second engine** — macOS 26 introduced `Speech.SpeechAnalyzer`, a new on-device speech recognition API with system-managed models (zero downloads) and streaming support. Investigate as an alternative/complement to Parakeet. Does not support custom vocabulary — corrections dictionary is essential. See memory file `project_transcription_improvements.md` for detailed implementation plan.
+- [x] **Apple Speech as second engine** — On-device speech recognition via `SFSpeechRecognizer` available as an alternative to Parakeet. Swift binary at `Engine/SpeechTranscribe/`, Python wrapper at `Engine/app/speech_transcriber.py`. Includes audio normalization for low-level system audio captures. Selectable via menubar → Transcription Engine. Requires macOS 26+, Dictation enabled for on-device model download. Does not support custom vocabulary — corrections dictionary is essential.
+
+- [ ] **In-Swift audio mixer (replace two-WAV + Python mix)** — Current design writes mic to `<name>.wav` and system audio to `<name>.sys.wav`, then `Engine/app/audio_mixer.py` saturates-adds them before transcription. This works but doubles disk I/O during recording and forces realtime transcription to be mic-only. Proper fix: in `AudioCapture.swift`, maintain two ring buffers (mic + system) and a drainer that pulls `min(mic_available, sys_available)` samples, saturating-adds them, and writes the mixed stream to a single WAV. Realtime transcription then sees the full mixed audio. Remove `audio_mixer.py` and the `.sys.wav` plumbing in `recorder.py` / `pipeline.py` once the Swift mixer is in place.
 
 - [ ] **Mic ducking in audio capture** — When system audio and mic overlap, reduce mic gain to prioritize meeting audio. Envelope-based gain control (~10ms attack, ~200ms release) in `AudioCapture.swift`. Inspired by TypeWhisper's implementation.
 

@@ -33,6 +33,45 @@ def _ensure_dirs() -> None:
     os.makedirs(QUEUE_DIR, exist_ok=True)
 
 
+def _kill_stray_capture_processes(exclude_pid: int | None = None) -> int:
+    """
+    SIGKILL any lingering capture-audio processes owned by the current user.
+
+    A stray process holds its ScreenCaptureKit stream open, which causes the
+    next capture-audio to hang during SCK setup and record mic only. The
+    .lock file only tracks the most recent PID, so earlier zombies are
+    invisible to orphan detection — scan ps directly.
+    """
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-u", str(os.getuid()), "-f", BINARY],
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        return 0  # pgrep exits 1 when no matches
+    except OSError as e:
+        logger.warning("Could not scan for stray capture-audio processes: %s", e)
+        return 0
+
+    killed = 0
+    for line in out.strip().splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid == os.getpid() or pid == exclude_pid:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            logger.warning("Killed stray capture-audio process pid=%d", pid)
+            killed += 1
+        except ProcessLookupError:
+            pass
+        except OSError as e:
+            logger.warning("Could not kill stray capture-audio pid=%d: %s", pid, e)
+    return killed
+
+
 def start_recording(source: str) -> str:
     """
     Start recording audio for the given source.
@@ -49,6 +88,7 @@ def start_recording(source: str) -> str:
         return state_mod.load().get("active_recording_path", "")
 
     _ensure_dirs()
+    _kill_stray_capture_processes()
 
     now = datetime.now()
     filename = "{source}_{date}_{time}.wav".format(
@@ -165,7 +205,7 @@ def stop_recording() -> str | None:
     except OSError as e:
         logger.warning("Could not remove .lock file: %s", e)
 
-    # Move recording to queue
+    # Move recording to queue (and its .sys.wav sibling, if any)
     queue_path = None
     if os.path.exists(active_path):
         filename = os.path.basename(active_path)
@@ -178,6 +218,18 @@ def stop_recording() -> str | None:
             queue_path = None
     else:
         logger.warning("Active recording file not found at: %s", active_path)
+
+    from .audio_mixer import system_path_for
+    active_sys_path = system_path_for(active_path)
+    if os.path.exists(active_sys_path):
+        queue_sys_path = system_path_for(
+            os.path.join(QUEUE_DIR, os.path.basename(active_path))
+        )
+        try:
+            os.rename(active_sys_path, queue_sys_path)
+            logger.info("System-audio track moved to queue: %s", queue_sys_path)
+        except OSError as e:
+            logger.error("Failed to move system-audio track to queue: %s", e)
 
     state_mod.update(
         recording_active=False,
@@ -204,6 +256,7 @@ def check_orphaned_recording() -> None:
     recordings/active/ to recordings/queue/.
     """
     _ensure_dirs()
+    _kill_stray_capture_processes()
 
     if not os.path.exists(LOCK_FILE):
         return
@@ -238,7 +291,7 @@ def check_orphaned_recording() -> None:
         orphaned_pid,
     )
 
-    # Move all .wav files from active/ to queue/
+    # Move all .wav files from active/ to queue/ (includes .sys.wav siblings)
     moved = 0
     try:
         for fname in os.listdir(ACTIVE_DIR):

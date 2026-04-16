@@ -25,13 +25,20 @@ let lockPath = (lockDir as NSString).appendingPathComponent(".lock")
 
 // MARK: - WAV Writer
 
-let wavWriter: WAVWriter
+// Derive a sibling path for the system-audio track.
+// e.g. /…/manual_2026-04-16_15-20.wav → /…/manual_2026-04-16_15-20.sys.wav
+let outputBase = (outputPath as NSString).deletingPathExtension
+let outputExt = (outputPath as NSString).pathExtension
+let systemOutputPath = outputBase + ".sys." + (outputExt.isEmpty ? "wav" : outputExt)
+
+let micWriter: WAVWriter
+let systemWriter: WAVWriter
 do {
-    // Ensure the output directory exists
     let outputDir = (outputPath as NSString).deletingLastPathComponent
     try FileManager.default.createDirectory(atPath: outputDir,
                                             withIntermediateDirectories: true)
-    wavWriter = try WAVWriter(path: outputPath)
+    micWriter = try WAVWriter(path: outputPath)
+    systemWriter = try WAVWriter(path: systemOutputPath)
 } catch {
     fputs("Failed to open output file: \(error)\n", stderr)
     exit(1)
@@ -50,7 +57,7 @@ do {
 
 // MARK: - Audio Capture
 
-let captureManager = AudioCaptureManager(wavWriter: wavWriter)
+let captureManager = AudioCaptureManager(micWriter: micWriter, systemWriter: systemWriter)
 
 do {
     try captureManager.start()
@@ -66,9 +73,14 @@ do {
 func shutdown() {
     captureManager.stop()
     do {
-        try wavWriter.finalize()
+        try micWriter.finalize()
     } catch {
-        fputs("Warning: Failed to finalize WAV file: \(error)\n", stderr)
+        fputs("Warning: Failed to finalize mic WAV file: \(error)\n", stderr)
+    }
+    do {
+        try systemWriter.finalize()
+    } catch {
+        fputs("Warning: Failed to finalize system WAV file: \(error)\n", stderr)
     }
     try? FileManager.default.removeItem(atPath: lockPath)
     exit(0)
@@ -89,5 +101,6 @@ sigtermSource.resume()
 
 // MARK: - Run Loop
 
-fputs("CaptureAudio: recording to \(outputPath)\n", stderr)
+fputs("CaptureAudio: recording mic to \(outputPath)\n", stderr)
+fputs("CaptureAudio: recording system to \(systemOutputPath)\n", stderr)
 RunLoop.main.run()
