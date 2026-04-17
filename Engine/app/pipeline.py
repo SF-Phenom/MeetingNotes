@@ -287,31 +287,27 @@ def process_recording(
         logger.error("Failed to write transcript file: %s", e)
         return None
 
-    # Step 9: Update state and clean up recording
+    # Step 9: Update state, then clean up recording.
+    #
+    # Ordering matters: persist state FIRST, then touch files. If file ops
+    # fail after state is durable, the recording sits in queue/ or done/ and
+    # cleanup.scan_for_orphans handles it. If we did file ops first and state
+    # then failed, a moved recording in done/ would have no pending_deletion
+    # entry — silent leak.
     try:
         current_state = state_mod.load()
         count = current_state.get("transcripts_since_checkin", 0) + 1
         retain = current_state.get("retain_recordings", False)
+        recording = RecordingFile(wav_path)
 
         state_updates: dict = {"transcripts_since_checkin": count}
 
-        # The mixed WAV is a derived artifact — always delete it.
-        if mixed_wav_path and os.path.exists(mixed_wav_path):
-            try:
-                os.remove(mixed_wav_path)
-            except OSError as e:
-                logger.warning("Could not delete mixed WAV %s: %s", mixed_wav_path, e)
-
-        recording = RecordingFile(wav_path)
         if retain:
-            moved = recording.move_to(DONE_DIR)
+            future_path = os.path.join(DONE_DIR, recording.basename)
             pending = list(current_state.get("pending_deletion", []))
-            if not any(e.get("path") == moved.wav_path for e in pending):
-                pending.append({"path": moved.wav_path, "recorded_date": date_str})
+            if not any(e.get("path") == future_path for e in pending):
+                pending.append({"path": future_path, "recorded_date": date_str})
             state_updates["pending_deletion"] = pending
-            logger.info("Retained recording in %s", DONE_DIR)
-        else:
-            recording.delete()
 
         state_mod.update(**state_updates)
         logger.info(
@@ -322,8 +318,30 @@ def process_recording(
     except OSError as e:
         # State-update failures (disk full, permission denied, etc.) are
         # logged but must not undo the already-written transcript. The
-        # retention + counter will be slightly stale until the next write.
+        # recording stays in queue/ for the next sweep.
         logger.error("Failed to update state (non-fatal): %s", e)
+        return out_path
+
+    # The mixed WAV is a derived artifact — always delete it.
+    if mixed_wav_path and os.path.exists(mixed_wav_path):
+        try:
+            os.remove(mixed_wav_path)
+        except OSError as e:
+            logger.warning("Could not delete mixed WAV %s: %s", mixed_wav_path, e)
+
+    if retain:
+        try:
+            recording.move_to(DONE_DIR)
+            logger.info("Retained recording in %s", DONE_DIR)
+        except OSError as e:
+            # State already references the future done/ path. The orphan
+            # scanner will reconcile if the move never completes.
+            logger.error(
+                "Could not move recording to %s (state already updated): %s",
+                DONE_DIR, e,
+            )
+    else:
+        recording.delete()
 
     logger.info("=== Pipeline complete: %s ===", out_path)
     return out_path
