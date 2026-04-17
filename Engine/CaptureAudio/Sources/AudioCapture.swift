@@ -35,6 +35,7 @@ final class AudioCaptureManager: @unchecked Sendable {
     // Mic path
     private var micEngine: AVAudioEngine?
     private var micConverter: AVAudioConverter?
+    private var micConfigObserver: NSObjectProtocol?
 
     // Process Tap path
     private var tapID: AudioObjectID = kAudioObjectUnknown
@@ -71,6 +72,10 @@ final class AudioCaptureManager: @unchecked Sendable {
         drainer?.stop()
         drainer = nil
 
+        if let obs = micConfigObserver {
+            NotificationCenter.default.removeObserver(obs)
+            micConfigObserver = nil
+        }
         micEngine?.stop()
         micEngine = nil
         micConverter = nil
@@ -107,15 +112,18 @@ final class AudioCaptureManager: @unchecked Sendable {
     // MARK: - Mic capture
 
     private func startMicCapture() throws {
+        // Called on initial start and again from the AVAudioEngineConfiguration
+        // Change handler. AVAudioEngine stops and fails to call the tap block
+        // when the default input device changes (AirPods connect, HDMI
+        // hot-plug, etc) — without the observer the WAV freezes because the
+        // MixerDrainer blocks on min(mic, sys) with mic permanently empty.
         let engine = AVAudioEngine()
-        micEngine = engine
         let inputNode = engine.inputNode
         let hwFormat = inputNode.outputFormat(forBus: 0)
 
         guard let converter = AVAudioConverter(from: hwFormat, to: outputFormat) else {
             throw CaptureError.converterCreationFailed
         }
-        micConverter = converter
 
         inputNode.installTap(
             onBus: 0, bufferSize: 4096, format: hwFormat
@@ -123,6 +131,45 @@ final class AudioCaptureManager: @unchecked Sendable {
             self?.handleMicBuffer(buffer, converter: converter)
         }
         try engine.start()
+
+        micEngine = engine
+        micConverter = converter
+        micConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.handleMicConfigChange()
+        }
+    }
+
+    private func handleMicConfigChange() {
+        // Apple stops the engine before posting this notification. Tearing
+        // down fully and rebuilding is more reliable than restarting in place
+        // when the hardware format actually changed (different sample rate or
+        // channel count on the new input device).
+        fputs(
+            "CaptureAudio: mic engine config changed (device hot-swap?) — reconfiguring\n",
+            stderr
+        )
+        if let obs = micConfigObserver {
+            NotificationCenter.default.removeObserver(obs)
+            micConfigObserver = nil
+        }
+        micEngine?.stop()
+        micEngine?.inputNode.removeTap(onBus: 0)
+        micEngine = nil
+        micConverter = nil
+
+        do {
+            try startMicCapture()
+            fputs("CaptureAudio: mic engine restarted after config change\n", stderr)
+        } catch {
+            fputs(
+                "CaptureAudio: FAILED to reconfigure mic after device change: \(error)\n",
+                stderr
+            )
+        }
     }
 
     private func handleMicBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter) {
