@@ -159,7 +159,12 @@ class RealtimeTranscriber:
         if not all_sents:
             return ""
         corrected = [
-            Sentence(start=s.start, end=s.end, text=apply_corrections(s.text))
+            Sentence(
+                start=s.start,
+                end=s.end,
+                text=apply_corrections(s.text),
+                speech_end=s.speech_end,
+            )
             for s in all_sents
         ]
         return build_plain_paragraphs(corrected)
@@ -333,16 +338,10 @@ class RealtimeTranscriber:
             )
 
             if text:
-                from app.transcript_formatter import Sentence
+                from app.transcriber import _extract_sentences
                 chunk_offset = self._chunk_index * MAX_CHUNK_SECS
-                self._current_chunk_sentences = [
-                    Sentence(
-                        start=s.start + chunk_offset,
-                        end=s.end + chunk_offset,
-                        text=s.text.strip(),
-                    )
-                    for s in getattr(result, "sentences", []) if s.text.strip()
-                ]
+                sents, _ = _extract_sentences(result, time_offset=chunk_offset)
+                self._current_chunk_sentences = sents
                 self._write_live_transcript(self._full_text())
 
         except Exception as e:

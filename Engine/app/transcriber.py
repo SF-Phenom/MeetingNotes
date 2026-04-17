@@ -296,7 +296,12 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     for idx_str, text in filtered:
         orig = all_sentences[int(idx_str)]
         filtered_sentences.append(
-            Sentence(start=orig.start, end=orig.end, text=apply_corrections(text))
+            Sentence(
+                start=orig.start,
+                end=orig.end,
+                text=apply_corrections(text),
+                speech_end=orig.speech_end,
+            )
         )
     timestamped_text = build_timestamped_paragraphs(filtered_sentences)
     plain_text = build_plain_paragraphs(filtered_sentences)
@@ -335,7 +340,29 @@ def _extract_sentences(
             continue
         abs_start = sent.start + time_offset
         abs_end = sent.end + time_offset
-        sentences.append(Sentence(start=abs_start, end=abs_end, text=text))
+        sentences.append(
+            Sentence(
+                start=abs_start,
+                end=abs_end,
+                text=text,
+                speech_end=_speech_end(sent, time_offset),
+            )
+        )
         last_end = max(last_end, abs_end)
 
     return sentences, last_end
+
+
+# Pure-punctuation tokens whose duration is mostly silence Parakeet absorbs
+# rather than spoken audio. Skipping them when computing ``speech_end``
+# gives us the end-of-real-speech reference needed for pause detection.
+_PARAKEET_PURE_PUNCT = frozenset(".!?,;:")
+
+
+def _speech_end(sent, time_offset: float) -> float:
+    """End time of the last non-pure-punctuation token in ``sent``."""
+    for tok in reversed(sent.tokens):
+        if tok.text.strip() not in _PARAKEET_PURE_PUNCT:
+            return tok.end + time_offset
+    # Degenerate case: whole sentence is punctuation. Fall back to sent.end.
+    return sent.end + time_offset

@@ -11,7 +11,7 @@ from app.transcript_formatter import (
 
 
 def _sent(start: float, end: float, text: str) -> Sentence:
-    return Sentence(start=start, end=end, text=text)
+    return Sentence(start=start, end=end, text=text)  # speech_end defaults to None
 
 
 class TestBuildPlainParagraphs:
@@ -113,6 +113,30 @@ class TestBuildPlainParagraphs:
             _sent(1.1, 2.0, "  World.  "),
         ]
         assert build_plain_paragraphs(sentences) == "Hello. World."
+
+    def test_speech_end_takes_precedence_over_end(self):
+        # Parakeet case: sentence.end absorbs the trailing-silence into the
+        # punctuation token's duration, so end == next.start. Using end
+        # directly yields gap=0 and no break. speech_end exposes the
+        # real-speech endpoint so the pause shows up.
+        sentences = [
+            Sentence(start=0.0, end=2.0, text="Hello there.", speech_end=1.6),
+            Sentence(start=2.0, end=3.0, text="How are you?", speech_end=2.8),
+        ]
+        result = build_plain_paragraphs(sentences)
+        # gap = 2.0 - 1.6 = 0.4s >= SENTENCE_END_GAP_SECS => paragraph break.
+        assert result == "Hello there.\n\nHow are you?"
+
+    def test_speech_end_none_falls_back_to_end(self):
+        # Apple Speech path: no tokens => speech_end left None. Gap math
+        # uses `end` directly, which equals next.start in this contrived
+        # case, so no break fires. (Matches the "no paragraph breaks
+        # without timing data" graceful-fallback behavior.)
+        sentences = [
+            Sentence(start=0.0, end=2.0, text="Hello there.", speech_end=None),
+            Sentence(start=2.0, end=3.0, text="How are you?", speech_end=None),
+        ]
+        assert "\n\n" not in build_plain_paragraphs(sentences)
 
 
 class TestBuildTimestampedParagraphs:

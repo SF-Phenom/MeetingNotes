@@ -32,14 +32,32 @@ SENTENCE_TERMINATORS = (".", "?", "!")
 
 @dataclass
 class Sentence:
-    """One sentence with absolute start/end times in seconds."""
+    """One sentence with absolute start/end times in seconds.
+
+    ``speech_end`` is the end time of the last *spoken* token, excluding
+    any trailing pure-punctuation tokens. Parakeet absorbs the speaker's
+    end-of-sentence silence into the duration of the terminal punctuation
+    token (e.g. a "." token can stretch 300 ms for a real sentence break),
+    so using ``end`` directly for gap math always gives zero. When
+    ``speech_end`` is populated, the paragraph-break logic uses it as the
+    "real speech stopped here" reference instead. Left as ``None`` for
+    engines without token-level timings (Apple Speech), in which case
+    gap math falls back to ``end`` and simply never triggers — paragraph
+    breaks are a Parakeet-only feature.
+    """
     start: float
     end: float
     text: str
+    speech_end: float | None = None
+
+
+def _pause_end(sent: Sentence) -> float:
+    """Return the timestamp to use as ``sent``'s pause-boundary reference."""
+    return sent.speech_end if sent.speech_end is not None else sent.end
 
 
 def _is_paragraph_boundary(prev: Sentence, cur: Sentence) -> bool:
-    gap = cur.start - prev.end
+    gap = cur.start - _pause_end(prev)
     if gap <= 0:
         return False
     if prev.text.rstrip().endswith(SENTENCE_TERMINATORS):
