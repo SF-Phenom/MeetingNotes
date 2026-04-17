@@ -261,7 +261,7 @@ class MeetingNotesApp(rumps.App):
             )
 
         # Setup precondition warning — first problem only (the user can
-        # fix one at a time). Sits above the Screen Recording warning so
+        # fix one at a time). Sits above the Audio Capture warning so
         # truly-broken setup gets the most prominent placement.
         if self._setup_problems:
             items.append(rumps.MenuItem(
@@ -803,19 +803,17 @@ class MeetingNotesApp(rumps.App):
     # ── Permissions ────────────────────────────────────────────────────────────
 
     def _open_audio_capture_settings(self, _sender) -> None:
-        """Open Privacy & Security in System Settings.
+        """Open the Audio Capture pane in System Settings.
 
-        macOS 14.2+ introduced Process Tap permission under a category
-        that is still being finalised across minor releases; opening the
-        Privacy root lets the user find whichever specific pane
-        ("Audio Capture", "System Audio Recording Only", etc.) their
-        version exposes. The exact URL will be pinned in Phase 4D once
-        we confirm the pane identifier on macOS 15 Sequoia.
+        The Process Tap permission (macOS 14.2+) appears as "Audio Capture"
+        under Privacy & Security. Tahoe 26's SecurityPrivacyExtension exposes
+        it via Privacy_AudioCapture. Falls back to the Privacy root if the
+        specific pane key is ever retired.
         """
         import subprocess as sp
         sp.Popen([
             "open",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture",
         ])
 
     # ── Utilities ──────────────────────────────────────────────────────────────

@@ -83,17 +83,18 @@ PERMISSIONS
 On first launch, macOS will ask for several permissions:
 
   Microphone              Required to capture your side of calls.
-  Screen Recording /      Required to capture system audio (the other
-  System Audio Recording  side of calls) via ScreenCaptureKit.
+  Audio Capture           Required to capture system audio (the other
+                          side of calls) via the CoreAudio Process Tap
+                          (macOS 14.2+).
   Accessibility           Required to detect active calls (Zoom, Meet, etc).
   Notifications           Optional, for transcription-complete alerts.
 
 Grant these when prompted. If you accidentally deny one, go to
 System Settings > Privacy & Security to re-enable it.
 
-Note: Without the Screen Recording / System Audio Recording
-permission, only your microphone is captured -- you won't hear
-the other participants in the transcript.
+Note: Without the Audio Capture permission, only your microphone
+is captured -- you won't hear the other participants in the
+transcript.
 
 
 TROUBLESHOOTING
