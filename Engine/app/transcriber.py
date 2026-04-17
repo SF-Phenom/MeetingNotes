@@ -109,6 +109,30 @@ def _load_parakeet_model():
     return _parakeet_model
 
 
+def cleanup_parakeet() -> None:
+    """Release the cached Parakeet model and clear MLX GPU memory.
+
+    Called from the menubar Quit handler so the ~2.5 GB of GPU memory
+    held by the model is released cleanly before the process exits.
+    Python would reclaim it on exit anyway, but doing it explicitly
+    means the Metal driver sees a clean teardown — useful when the user
+    quits and immediately relaunches.
+
+    Idempotent — safe to call when no model has been loaded.
+    """
+    global _parakeet_model, _parakeet_stream
+    if _parakeet_model is None and _parakeet_stream is None:
+        return
+    _parakeet_model = None
+    _parakeet_stream = None
+    try:
+        import mlx.core as mx
+        mx.metal.clear_cache()
+        logger.info("Parakeet model released and MLX cache cleared")
+    except Exception as e:  # noqa: BLE001 — cleanup must never crash quit
+        logger.warning("Could not clear MLX cache during cleanup: %s", e)
+
+
 def _transcribe_chunk(model, wav_chunk_path: str, decoding) -> object:
     """Transcribe a single WAV chunk and free GPU memory afterward."""
     import mlx.core as mx

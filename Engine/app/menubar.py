@@ -499,6 +499,15 @@ class MeetingNotesApp(rumps.App):
             self._call_detector.stop()
         except Exception as e:
             logger.error("Error stopping call detector worker: %s", e)
+        # Release the cached Parakeet model + clear MLX GPU memory before
+        # exit. Python would reclaim it on process exit anyway, but doing
+        # it explicitly gives Metal a clean teardown — important when the
+        # user quits and immediately relaunches.
+        try:
+            from app import transcriber
+            transcriber.cleanup_parakeet()
+        except Exception as e:  # noqa: BLE001 — quit must always finish
+            logger.warning("Could not release Parakeet model on quit: %s", e)
         logger.info("MeetingNotes app stopped")
         rumps.quit_application()
 

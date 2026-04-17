@@ -109,3 +109,67 @@ class TestSynchronizeWithWatchdog:
             name="test",
             timeout_secs=0.05,
         )
+
+
+class TestCleanupParakeet:
+    @pytest.fixture(autouse=True)
+    def _isolate_globals(self, monkeypatch):
+        """Save + restore the module-level model/stream so tests don't bleed."""
+        before_model = transcriber._parakeet_model
+        before_stream = transcriber._parakeet_stream
+        yield
+        transcriber._parakeet_model = before_model
+        transcriber._parakeet_stream = before_stream
+
+    def test_idempotent_when_nothing_loaded(self, monkeypatch):
+        transcriber._parakeet_model = None
+        transcriber._parakeet_stream = None
+
+        # Patch mlx.core.metal.clear_cache so a successful call would be
+        # observable — but the function should short-circuit before calling it.
+        called = []
+        import sys
+        fake_mx = types.ModuleType("mlx.core")
+        fake_mx.metal = types.SimpleNamespace(
+            clear_cache=lambda: called.append("clear"),
+        )
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        transcriber.cleanup_parakeet()  # Should be a no-op.
+        assert called == [], "cleanup must short-circuit when nothing is loaded"
+
+    def test_releases_globals_and_clears_cache(self, monkeypatch):
+        transcriber._parakeet_model = "model-sentinel"
+        transcriber._parakeet_stream = "stream-sentinel"
+
+        called = []
+        import sys
+        fake_mx = types.ModuleType("mlx.core")
+        fake_mx.metal = types.SimpleNamespace(
+            clear_cache=lambda: called.append("clear"),
+        )
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        transcriber.cleanup_parakeet()
+
+        assert transcriber._parakeet_model is None
+        assert transcriber._parakeet_stream is None
+        assert called == ["clear"]
+
+    def test_clear_cache_failure_is_swallowed(self, monkeypatch):
+        """Quit must always finish — a clear_cache exception can't propagate."""
+        transcriber._parakeet_model = "x"
+        transcriber._parakeet_stream = "y"
+
+        def _boom():
+            raise RuntimeError("metal driver unhappy")
+
+        import sys
+        fake_mx = types.ModuleType("mlx.core")
+        fake_mx.metal = types.SimpleNamespace(clear_cache=_boom)
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_mx)
+
+        # Should NOT raise. Globals still get nulled before the exception.
+        transcriber.cleanup_parakeet()
+        assert transcriber._parakeet_model is None
+        assert transcriber._parakeet_stream is None
