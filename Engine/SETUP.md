@@ -196,7 +196,13 @@ Install the binary:
 ```bash
 mkdir -p ~/MeetingNotes_RT/Engine/.bin
 cp .build/release/CaptureAudio ~/MeetingNotes_RT/Engine/.bin/capture-audio
+codesign -s - --force ~/MeetingNotes_RT/Engine/.bin/capture-audio
 ```
+
+The `codesign` step replaces the linker-provided signature with a proper ad-hoc
+one so the embedded `Info.plist` (including the Audio Capture and Microphone
+usage descriptions) is hashed into the CodeDirectory. Without it, macOS may
+attribute TCC prompts to Terminal / python3.12 instead of MeetingNotes.
 
 ---
 

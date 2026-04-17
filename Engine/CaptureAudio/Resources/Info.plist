@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.meetingnotes.capture-audio</string>
+	<key>CFBundleName</key>
+	<string>MeetingNotes</string>
+	<key>CFBundleDisplayName</key>
+	<string>MeetingNotes</string>
+	<key>CFBundleExecutable</key>
+	<string>capture-audio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 MeetingNotes</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>MeetingNotes records system audio so both sides of your Zoom, Google Meet, and FaceTime conversations appear in the transcript. Audio stays on this Mac.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MeetingNotes records your microphone during calls so your voice appears in the transcript. Audio stays on this Mac.</string>
+</dict>
+</plist>

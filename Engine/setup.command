@@ -307,7 +307,15 @@ fi
 # ============================================================
 step 6 "Swift audio capture binary"
 
-if [[ -x "$CAPTURE_BINARY" ]]; then
+need_capture_rebuild=false
+if [[ ! -x "$CAPTURE_BINARY" ]]; then
+    need_capture_rebuild=true
+elif ! codesign -d --verbose=1 "$CAPTURE_BINARY" 2>&1 | grep -q 'com.meetingnotes.capture-audio'; then
+    info "Existing capture-audio predates Audio Capture TCC hardening — rebuilding..."
+    need_capture_rebuild=true
+fi
+
+if ! $need_capture_rebuild; then
     already "capture-audio binary"
 else
     info "Building CaptureAudio (Swift)..."
@@ -323,6 +331,12 @@ else
     mkdir -p "$ENGINE_DIR/.bin"
     cp "$build_tmp/release/CaptureAudio" "$CAPTURE_BINARY"
     rm -rf "$build_tmp"
+    # Replace the SPM linker-signed signature with a proper ad-hoc one so the
+    # embedded Info.plist becomes "bound" (hashed into the CodeDirectory) and
+    # TCC can read NSAudioCaptureUsageDescription / NSMicrophoneUsageDescription
+    # off our binary instead of walking up to the parent process.
+    codesign -s - --force "$CAPTURE_BINARY" >/dev/null 2>&1 || \
+        warn "Ad-hoc codesign of capture-audio failed; TCC prompts may attribute to Terminal"
     cd "$BASE_DIR"
     success "capture-audio built and installed"
 fi
