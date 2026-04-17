@@ -123,15 +123,22 @@ def copy_prompt_to_clipboard() -> bool:
     """
     try:
         prompt = generate_checkin_prompt()
+        # pbcopy normally returns in milliseconds; a 5s cap catches the
+        # rare "clipboard server wedged" case without penalizing a
+        # slightly-slow-but-alive system.
         subprocess.run(
             ["pbcopy"],
             input=prompt.encode(),
             check=True,
+            timeout=5,
         )
         logger.info("Check-in prompt copied to clipboard (%d chars)", len(prompt))
         return True
     except subprocess.CalledProcessError as e:
         logger.error("pbcopy failed: %s", e)
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("pbcopy timed out — clipboard server may be wedged.")
         return False
     except Exception as e:
         logger.error("Unexpected error copying prompt to clipboard: %s", e)
