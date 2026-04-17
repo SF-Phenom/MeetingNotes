@@ -3,16 +3,20 @@
 A meeting recording is more than the mic .wav. Depending on context there
 may also be:
 
-  - ``<base>.sys.wav`` — system-audio track from ScreenCaptureKit
   - ``<base>.meta.json`` — structured metadata (calendar enrichment, source)
   - ``<base>.srt`` — legacy captions file (whisper-era; Parakeet doesn't
     produce these but they may linger on disk)
 
 Before this class, three modules (recorder, pipeline, cleanup) each
-hand-rolled the glob / move / delete logic with subtle bugs:
-cleanup.py didn't touch .sys.wav, and recorder's orphan path dropped
-.meta.json. Funnel them all through one aggregate so a fix made here lands
-everywhere.
+hand-rolled the glob / move / delete logic with subtle bugs (e.g.
+recorder's orphan path used to drop .meta.json). Funnel them all
+through one aggregate so a fix made here lands everywhere.
+
+Historical note: a third sidecar, ``<base>.sys.wav``, existed during the
+ScreenCaptureKit era when mic and system audio were captured to separate
+WAVs and post-mixed in Python. The Phase 4B rewrite moved mixing into
+the Swift capture binary, so the main ``.wav`` is now the pre-mixed
+stream and the ``.sys.wav`` sibling no longer exists.
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # Extensions that sit alongside the main .wav. Order matters only for logging.
-SIDECAR_EXTENSIONS: tuple[str, ...] = (".sys.wav", ".meta.json", ".srt")
+SIDECAR_EXTENSIONS: tuple[str, ...] = (".meta.json", ".srt")
 
 
 class RecordingFile:
@@ -32,9 +36,8 @@ class RecordingFile:
 
     def __init__(self, wav_path: str) -> None:
         self._wav_path = os.path.expanduser(wav_path)
-        # Strip only the trailing ``.wav`` — without that, a ``foo.sys.wav``
-        # accidentally passed in would get ``foo.sys`` as the base and miss
-        # its own siblings. Callers should pass the mic .wav, not the .sys.wav.
+        # Strip only the trailing ``.wav`` — any compound-extension siblings
+        # (historically ``.sys.wav``) would otherwise confuse the base path.
         if self._wav_path.endswith(".wav"):
             self._base = self._wav_path[:-4]
         else:
@@ -45,10 +48,6 @@ class RecordingFile:
     @property
     def wav_path(self) -> str:
         return self._wav_path
-
-    @property
-    def system_audio_path(self) -> str:
-        return self._base + ".sys.wav"
 
     @property
     def metadata_path(self) -> str:

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import BENCHMARK_META, BENCHMARK_SYS_WAV, BENCHMARK_WAV
+from .conftest import BENCHMARK_META, BENCHMARK_WAV
 
 
 pytestmark = [
@@ -90,9 +90,6 @@ def pipeline_output(tmp_path_factory, benchmark_meta) -> dict:
     work_dir = tmp_path_factory.mktemp("benchmark_run")
     mic_copy = work_dir / "zoom_2026-01-01_10-00.wav"
     shutil.copy(BENCHMARK_WAV, mic_copy)
-    if BENCHMARK_SYS_WAV.exists():
-        sys_copy = work_dir / "zoom_2026-01-01_10-00.sys.wav"
-        shutil.copy(BENCHMARK_SYS_WAV, sys_copy)
 
     # Point the pipeline's TRANSCRIPTS_DIR at the tmp area. Kept narrow; we
     # don't want to fight pipeline internals, just isolate output.

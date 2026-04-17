@@ -25,7 +25,6 @@ from datetime import datetime
 from typing import Callable
 
 from . import state as state_mod
-from .audio_mixer import mix_to, system_path_for
 from .calendar_lookup import enrich_metadata as _calendar_enrich
 from .exporter import ExportResult, export_action_items
 from .formatter import format_transcript, slugify
@@ -203,29 +202,12 @@ def process_recording(
     except Exception as e:  # noqa: BLE001 — best-effort enrichment
         logger.warning("Calendar enrichment failed (non-fatal): %s", e)
 
-    # If capture-audio produced a system-audio sibling track, mix it with
-    # the mic track before transcription. The realtime transcriber only saw
-    # the mic file, so its pre-transcribed text is incomplete when a system
-    # track exists — force re-transcription from the mixed WAV in that case.
-    sys_wav_path = system_path_for(wav_path)
-    mixed_wav_path: str | None = None
-    if os.path.exists(sys_wav_path):
-        mixed_wav_path = os.path.splitext(wav_path)[0] + ".mixed.wav"
-        try:
-            if mix_to(wav_path, sys_wav_path, mixed_wav_path):
-                logger.info("Mixed mic + system audio -> %s", os.path.basename(mixed_wav_path))
-                pre_transcribed_text = None  # re-transcribe the mix
-                transcribe_path = mixed_wav_path
-            else:
-                logger.warning("Audio mix failed, transcribing mic-only")
-                transcribe_path = wav_path
-        except (OSError, ValueError) as e:
-            # OSError — file I/O; ValueError — malformed WAV header. Both
-            # are recoverable by falling back to the mic-only track.
-            logger.warning("Audio mix raised: %s — transcribing mic-only", e)
-            transcribe_path = wav_path
-    else:
-        transcribe_path = wav_path
+    # The Swift capture binary produces a single pre-mixed mic+system WAV
+    # (the in-Swift MixerDrainer saturating-adds both streams into one file),
+    # so transcription always reads the mic path directly. Prior versions
+    # mixed a .sys.wav sibling here; that block and audio_mixer.py were
+    # deleted in the Phase 4C cleanup.
+    transcribe_path = wav_path
 
     # Step 3 & 4: Transcribe (or use pre-transcribed text from realtime mode)
     transcription = None
@@ -378,13 +360,6 @@ def process_recording(
         # recording stays in queue/ for the next sweep.
         logger.error("Failed to update state (non-fatal): %s", e)
         return out_path
-
-    # The mixed WAV is a derived artifact — always delete it.
-    if mixed_wav_path and os.path.exists(mixed_wav_path):
-        try:
-            os.remove(mixed_wav_path)
-        except OSError as e:
-            logger.warning("Could not delete mixed WAV %s: %s", mixed_wav_path, e)
 
     if retain:
         try:

@@ -259,7 +259,7 @@ def stop_recording() -> str | None:
     except OSError as e:
         logger.warning("Could not remove .lock file: %s", e)
 
-    # Move .wav + every sidecar (.sys.wav, .meta.json, etc.) to the queue dir
+    # Move .wav + every sidecar (.meta.json, etc.) to the queue dir
     # as one atomic-looking unit.
     queue_path: str | None = None
     if os.path.exists(active_path):
@@ -339,8 +339,7 @@ def check_orphaned_recording() -> None:
     moved = 0
     try:
         for fname in os.listdir(ACTIVE_DIR):
-            lower = fname.lower()
-            if not lower.endswith(".wav") or lower.endswith(".sys.wav"):
+            if not fname.lower().endswith(".wav"):
                 continue
             src = os.path.join(ACTIVE_DIR, fname)
             try:

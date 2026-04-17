@@ -8,9 +8,9 @@ the pipeline. Until the file exists, integration tests are auto-skipped.
 
 ### Expected files
 
-- `benchmark.wav` — mic-only (or mixed) 16 kHz mono Int16 PCM, ~2 minutes
-- `benchmark.sys.wav` — the system-audio counterpart (needed for Phase 4
-  full-audio mixer verification). Same format as above. Optional until Phase 4.
+- `benchmark.wav` — a pre-mixed mic + system 16 kHz mono Int16 PCM, ~2 minutes.
+  (The Swift capture binary writes a single mixed WAV since Phase 4B; the
+  old dual-WAV design is gone.)
 - `benchmark.yaml` — metadata describing the recording (see schema below)
 
 ### benchmark.yaml schema
@@ -48,7 +48,7 @@ notes: |
 ### Recording guidance
 
 1. Record a real 2-minute mock meeting with a Zoom/Meet call so BOTH mic and
-   system audio are captured (proves dual-WAV + eventual in-Swift mixer).
+   system audio are captured into the single pre-mixed WAV.
 2. Include 2–3 distinctive made-up terms that you list in `expected_phrases`.
 3. Include at least one clearly phrased action item.
 4. Include ~10 seconds of silence somewhere to exercise VAD / chunk boundary

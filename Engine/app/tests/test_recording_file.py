@@ -27,7 +27,6 @@ class TestPaths:
     def test_paths_are_derived_from_wav(self, tmp_path):
         rf = RecordingFile(str(tmp_path / "zoom_2026-01-01_10-00.wav"))
         assert rf.wav_path == str(tmp_path / "zoom_2026-01-01_10-00.wav")
-        assert rf.system_audio_path == str(tmp_path / "zoom_2026-01-01_10-00.sys.wav")
         assert rf.metadata_path == str(tmp_path / "zoom_2026-01-01_10-00.meta.json")
         assert rf.srt_path == str(tmp_path / "zoom_2026-01-01_10-00.srt")
 
@@ -36,12 +35,13 @@ class TestPaths:
         assert rf.basename == "meet_2026-04-15_14-00.wav"
 
     def test_strips_only_the_trailing_wav(self, tmp_path):
-        """Passing a .sys.wav file should still treat it as the 'main' wav
-        (caller's responsibility to pass the mic file; we don't silently
-        rewrite to the paired mic)."""
+        """Passing a compound-extension file (e.g. legacy ``.sys.wav``) should
+        still have the trailing ``.wav`` stripped cleanly rather than being
+        treated as a dotted extension. We don't rewrite the path to a paired
+        mic file — caller's responsibility."""
         rf = RecordingFile(str(tmp_path / "x.sys.wav"))
         # Base should drop the trailing `.wav` only:
-        assert rf.system_audio_path == str(tmp_path / "x.sys.sys.wav")
+        assert rf.metadata_path == str(tmp_path / "x.sys.meta.json")
 
 
 class TestExistingFiles:
@@ -50,10 +50,10 @@ class TestExistingFiles:
         assert rf.existing_files() == [rf.wav_path]
 
     def test_includes_all_present_sidecars(self, recording):
-        rf = recording(sidecars=(".sys.wav", ".meta.json", ".srt"))
+        rf = recording(sidecars=(".meta.json", ".srt"))
         found = rf.existing_files()
         # Order: wav, then sidecars in SIDECAR_EXTENSIONS order
-        assert found == [rf.wav_path, rf.system_audio_path, rf.metadata_path, rf.srt_path]
+        assert found == [rf.wav_path, rf.metadata_path, rf.srt_path]
 
     def test_missing_wav_omitted(self, tmp_path):
         # Sidecar exists but main .wav doesn't — should omit the wav.
@@ -69,7 +69,7 @@ class TestExistingFiles:
 
 class TestDelete:
     def test_deletes_all_existing(self, recording):
-        rf = recording(sidecars=(".sys.wav", ".meta.json"))
+        rf = recording(sidecars=(".meta.json", ".srt"))
         assert rf.delete() == 3
         assert rf.existing_files() == []
 
@@ -83,14 +83,14 @@ class TestDelete:
         assert rf.delete() == 0
 
     def test_second_delete_is_no_op(self, recording):
-        rf = recording(sidecars=(".sys.wav",))
+        rf = recording(sidecars=(".meta.json",))
         assert rf.delete() == 2
         assert rf.delete() == 0
 
 
 class TestMoveTo:
     def test_moves_wav_and_sidecars(self, recording, tmp_path):
-        rf = recording(sidecars=(".sys.wav", ".meta.json"))
+        rf = recording(sidecars=(".meta.json", ".srt"))
         dest = tmp_path / "queue"
         moved = rf.move_to(str(dest))
         # Original paths gone:
@@ -98,13 +98,13 @@ class TestMoveTo:
         # New location has all three:
         assert sorted(p.name for p in dest.iterdir()) == [
             "zoom_2026-01-01_10-00.meta.json",
-            "zoom_2026-01-01_10-00.sys.wav",
+            "zoom_2026-01-01_10-00.srt",
             "zoom_2026-01-01_10-00.wav",
         ]
         # Returned RecordingFile points at the new location.
         assert moved.wav_path == str(dest / "zoom_2026-01-01_10-00.wav")
         assert moved.existing_files() == [
-            moved.wav_path, moved.system_audio_path, moved.metadata_path,
+            moved.wav_path, moved.metadata_path, moved.srt_path,
         ]
 
     def test_creates_dest_dir(self, recording, tmp_path):
@@ -128,7 +128,7 @@ class TestMoveTo:
         assert (dest / "nothing.meta.json").exists()
 
     def test_moves_only_what_exists(self, recording, tmp_path):
-        rf = recording(sidecars=(".meta.json",))  # no .sys.wav
+        rf = recording(sidecars=(".meta.json",))  # no .srt
         dest = tmp_path / "out"
         rf.move_to(str(dest))
         names = sorted(p.name for p in dest.iterdir())

@@ -29,5 +29,4 @@ os.environ.setdefault(
 
 FIXTURES_DIR = _ENGINE_DIR / "app" / "tests" / "fixtures"
 BENCHMARK_WAV = FIXTURES_DIR / "benchmark.wav"
-BENCHMARK_SYS_WAV = FIXTURES_DIR / "benchmark.sys.wav"
 BENCHMARK_META = FIXTURES_DIR / "benchmark.yaml"
