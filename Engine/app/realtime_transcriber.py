@@ -72,8 +72,11 @@ class RealtimeTranscriber:
 
         # Chunk tracking
         self._chunk_index: int = 0  # Which fixed chunk we're transcribing
-        self._chunk_texts: list[str] = []  # Finalized text per completed chunk
-        self._current_chunk_text: str = ""  # Latest text for the in-progress chunk
+        # Finalized per completed chunk — one Sentence list each so the
+        # paragraph formatter sees absolute timings across the whole session.
+        self._chunk_sentences: list[list] = []
+        # Latest sentences for the in-progress chunk (absolute times).
+        self._current_chunk_sentences: list = []
         self._last_file_size: int = WAV_HEADER_SIZE  # Last observed file size
 
     @property
@@ -94,8 +97,8 @@ class RealtimeTranscriber:
 
         self._wav_path = wav_path
         self._chunk_index = 0
-        self._chunk_texts = []
-        self._current_chunk_text = ""
+        self._chunk_sentences = []
+        self._current_chunk_sentences = []
         self._last_file_size = WAV_HEADER_SIZE
         self._stop_event.clear()
         self._unhealthy_event.clear()
@@ -146,12 +149,20 @@ class RealtimeTranscriber:
         return accumulated
 
     def _full_text(self) -> str:
-        """Combine finalized chunk texts with the current in-progress chunk."""
+        """Assemble the session transcript with paragraph breaks on pauses."""
         from app.corrections import apply_corrections
-        parts = [t for t in self._chunk_texts if t]
-        if self._current_chunk_text:
-            parts.append(self._current_chunk_text)
-        return apply_corrections(" ".join(parts))
+        from app.transcript_formatter import Sentence, build_plain_paragraphs
+        all_sents: list[Sentence] = []
+        for chunk in self._chunk_sentences:
+            all_sents.extend(chunk)
+        all_sents.extend(self._current_chunk_sentences)
+        if not all_sents:
+            return ""
+        corrected = [
+            Sentence(start=s.start, end=s.end, text=apply_corrections(s.text))
+            for s in all_sents
+        ]
+        return build_plain_paragraphs(corrected)
 
     def _run(self) -> None:
         """Background loop: poll for new audio, transcribe periodically."""
@@ -228,14 +239,14 @@ class RealtimeTranscriber:
         # for the current chunk, we must still move forward.
         current_chunk_end_byte = (self._chunk_index + 1) * chunk_bytes
         while total_pcm > current_chunk_end_byte:
-            self._chunk_texts.append(self._current_chunk_text)
+            self._chunk_sentences.append(self._current_chunk_sentences)
             logger.info(
-                "Chunk %d finalized (%d chars). Starting chunk %d.",
+                "Chunk %d finalized (%d sentences). Starting chunk %d.",
                 self._chunk_index,
-                len(self._current_chunk_text),
+                len(self._current_chunk_sentences),
                 self._chunk_index + 1,
             )
-            self._current_chunk_text = ""
+            self._current_chunk_sentences = []
             self._chunk_index += 1
             current_chunk_end_byte = (self._chunk_index + 1) * chunk_bytes
 
@@ -322,7 +333,16 @@ class RealtimeTranscriber:
             )
 
             if text:
-                self._current_chunk_text = text
+                from app.transcript_formatter import Sentence
+                chunk_offset = self._chunk_index * MAX_CHUNK_SECS
+                self._current_chunk_sentences = [
+                    Sentence(
+                        start=s.start + chunk_offset,
+                        end=s.end + chunk_offset,
+                        text=s.text.strip(),
+                    )
+                    for s in getattr(result, "sentences", []) if s.text.strip()
+                ]
                 self._write_live_transcript(self._full_text())
 
         except Exception as e:

@@ -194,8 +194,8 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
             "parakeet-mlx is not installed. Run: pip install parakeet-mlx"
         )
 
-    all_segments: list[tuple[str, str]] = []
-    last_end_seconds = 0
+    all_sentences = []
+    last_end_seconds = 0.0
 
     if duration_secs <= PARAKEET_CHUNK_SECS:
         # Short recording — transcribe in one pass
@@ -205,7 +205,7 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
         except Exception as e:
             raise RuntimeError(f"Parakeet transcription failed: {e}") from e
 
-        all_segments, last_end_seconds = _extract_segments(result, time_offset=0)
+        all_sentences, last_end_seconds = _extract_sentences(result, time_offset=0)
     else:
         # Long recording — split into chunks
         n_chunks = int((n_frames + chunk_frames - 1) // chunk_frames)
@@ -250,10 +250,10 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
                         chunk_idx + 1, n_chunks, chunk_elapsed,
                     )
 
-                    chunk_segs, chunk_end = _extract_segments(
+                    chunk_sents, chunk_end = _extract_sentences(
                         result, time_offset=time_offset,
                     )
-                    all_segments.extend(chunk_segs)
+                    all_sentences.extend(chunk_sents)
                     last_end_seconds = max(last_end_seconds, chunk_end)
 
                 except Exception as e:
@@ -274,23 +274,36 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
 
     elapsed = time.time() - t0
 
-    if not all_segments:
+    if not all_sentences:
         raise RuntimeError("Parakeet produced no output")
 
     duration_minutes = max(1, round(last_end_seconds / 60))
 
-    # Apply transcript filter and corrections dictionary
+    # Apply the repeat-collapsing filter + corrections dictionary, then
+    # hand the resulting sentences to the paragraph formatter. The filter
+    # works on (key, text) tuples — use the list index as the key so we
+    # can recover each kept sentence's original start/end timestamps.
     from app.transcript_filter import filter_segments
     from app.corrections import apply_corrections
-    all_segments = filter_segments(all_segments)
-    all_segments = [(ts, apply_corrections(txt)) for ts, txt in all_segments]
-    timestamped_lines = [f"{ts} {txt}" for ts, txt in all_segments]
-    timestamped_text = "\n".join(timestamped_lines)
-    plain_text = " ".join(txt for _, txt in all_segments)
+    from app.transcript_formatter import (
+        Sentence,
+        build_plain_paragraphs,
+        build_timestamped_paragraphs,
+    )
+    indexed = [(str(i), s.text) for i, s in enumerate(all_sentences)]
+    filtered = filter_segments(indexed)
+    filtered_sentences: list[Sentence] = []
+    for idx_str, text in filtered:
+        orig = all_sentences[int(idx_str)]
+        filtered_sentences.append(
+            Sentence(start=orig.start, end=orig.end, text=apply_corrections(text))
+        )
+    timestamped_text = build_timestamped_paragraphs(filtered_sentences)
+    plain_text = build_plain_paragraphs(filtered_sentences)
 
     logger.info(
         "Parakeet transcription complete: %d segments, ~%d min, %.1fs wall time",
-        len(all_segments),
+        len(filtered_sentences),
         duration_minutes,
         elapsed,
     )
@@ -303,29 +316,26 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     )
 
 
-def _extract_segments(
+def _extract_sentences(
     result, time_offset: float = 0,
-) -> tuple[list[tuple[str, str]], float]:
-    """
-    Extract (timestamp, text) segments from a Parakeet AlignedResult.
+):
+    """Extract :class:`Sentence` records from a Parakeet AlignedResult.
 
-    Adds time_offset to all timestamps so chunks are stitched correctly.
-    Returns (segments, last_end_seconds).
+    Adds ``time_offset`` so sentences from later chunks line up on the
+    recording's absolute timeline. Returns ``(sentences, last_end)``.
     """
-    segments: list[tuple[str, str]] = []
+    from app.transcript_formatter import Sentence
+
+    sentences: list[Sentence] = []
     last_end = 0.0
 
     for sent in result.sentences:
-        seg_text = sent.text.strip()
-        if not seg_text:
+        text = sent.text.strip()
+        if not text:
             continue
         abs_start = sent.start + time_offset
         abs_end = sent.end + time_offset
-        h = int(abs_start // 3600)
-        m = int((abs_start % 3600) // 60)
-        s = int(abs_start % 60)
-        timestamp = f"[{h:02d}:{m:02d}:{s:02d}]"
-        segments.append((timestamp, seg_text))
+        sentences.append(Sentence(start=abs_start, end=abs_end, text=text))
         last_end = max(last_end, abs_end)
 
-    return segments, last_end
+    return sentences, last_end
