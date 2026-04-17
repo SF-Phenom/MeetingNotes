@@ -14,7 +14,7 @@ import subprocess
 from datetime import date, datetime
 
 from app import state
-from app.state import BASE_DIR, TRANSCRIPTS_DIR, CONTEXT_PATH
+from app.environment import BASE_DIR, TRANSCRIPTS_DIR, CONTEXT_PATH
 
 logger = logging.getLogger(__name__)
 PROJECTS_DIR = os.path.join(BASE_DIR, "projects")

@@ -35,7 +35,7 @@ from .transcription_engine import get_batch_engine
 
 logger = logging.getLogger(__name__)
 
-from .state import BASE_DIR, TRANSCRIPTS_DIR, CONTEXT_PATH, DONE_DIR
+from .environment import BASE_DIR, TRANSCRIPTS_DIR, CONTEXT_PATH, DONE_DIR
 
 
 # --- Helpers -----------------------------------------------------------------

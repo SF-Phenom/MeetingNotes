@@ -17,7 +17,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.state import BASE_DIR
+from app.environment import BASE_DIR
 
 logger = logging.getLogger(__name__)
 CREDENTIALS_DIR = os.path.join(BASE_DIR, "Engine", ".credentials")

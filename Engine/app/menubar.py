@@ -29,6 +29,7 @@ from app import recorder
 from app import calendar_lookup
 from app import checkin
 from app import cleanup
+from app import environment
 from app import exporter
 from app import transcription_engine
 from app.call_detector_proxy import CallDetectorProxy
@@ -66,7 +67,7 @@ ICON_CHECKIN = "🔔"
 # Each tick is 10 seconds, so 3 = 30 seconds of no detection.
 CALL_END_DEBOUNCE = 3
 
-_QUEUE_DIR = state_mod.QUEUE_DIR
+_QUEUE_DIR = environment.QUEUE_DIR
 
 # ─── MeetingNotes App ─────────────────────────────────────────────────────────
 
@@ -137,6 +138,14 @@ class MeetingNotesApp(rumps.App):
                 subtitle="System audio unavailable",
                 message="Grant Screen Recording in System Settings → Privacy.",
             ))
+
+        # Setup precondition probe — load-bearing components only (the
+        # capture-audio binary, the Engine dir). Non-empty result means
+        # the menubar will surface "⚠ Setup incomplete — …" so the user
+        # finds out at launch instead of at "Start Recording" time.
+        self._setup_problems: list[str] = environment.check_setup()
+        if self._setup_problems:
+            logger.error("Setup incomplete: %s", self._setup_problems[0])
 
         # Summarization model state (Ollama discovery, API key, preference).
         self._model_manager = ModelManager()
@@ -250,6 +259,16 @@ class MeetingNotesApp(rumps.App):
                     callback=self._authorize_calendar,
                 )
             )
+
+        # Setup precondition warning — first problem only (the user can
+        # fix one at a time). Sits above the Screen Recording warning so
+        # truly-broken setup gets the most prominent placement.
+        if self._setup_problems:
+            items.append(rumps.MenuItem(
+                "⚠ Setup incomplete — {}".format(
+                    self._setup_problems[0].split(" — ")[0]
+                ),
+            ))
 
         # Screen Recording permission status — shown only when denied so
         # the user can jump straight to System Settings to grant it.

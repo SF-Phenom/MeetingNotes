@@ -24,18 +24,11 @@ import logging
 import os
 from dataclasses import dataclass, field, fields
 
+from app.environment import ENGINE_DIR
+
 logger = logging.getLogger(__name__)
 
-BASE_DIR = os.environ.get("MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes_RT"))
-STATE_PATH = os.path.join(BASE_DIR, "Engine", "state.json")
-
-# Shared path constants — import these instead of redefining per module
-ENGINE_DIR = os.path.join(BASE_DIR, "Engine")
-QUEUE_DIR = os.path.join(ENGINE_DIR, "recordings", "queue")
-ACTIVE_DIR = os.path.join(ENGINE_DIR, "recordings", "active")
-DONE_DIR = os.path.join(ENGINE_DIR, "recordings", "done")
-TRANSCRIPTS_DIR = os.path.join(BASE_DIR, "transcripts")
-CONTEXT_PATH = os.path.join(BASE_DIR, "Settings", "context.md")
+STATE_PATH = os.path.join(ENGINE_DIR, "state.json")
 
 @dataclass(frozen=True)
 class State:

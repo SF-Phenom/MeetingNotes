@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-from app.state import BASE_DIR, TRANSCRIPTS_DIR
+from app.environment import BASE_DIR, TRANSCRIPTS_DIR
 
 
 def scan_transcripts() -> dict:

@@ -15,7 +15,7 @@ import logging
 import os
 import re
 
-from app.state import BASE_DIR
+from app.environment import BASE_DIR
 
 logger = logging.getLogger(__name__)
 

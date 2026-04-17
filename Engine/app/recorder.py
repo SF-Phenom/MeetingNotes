@@ -19,11 +19,11 @@ import threading
 from datetime import datetime
 
 from . import state as state_mod
+from .environment import ACTIVE_DIR, CAPTURE_AUDIO_BIN, QUEUE_DIR
 from .recording_file import RecordingFile
-from .state import BASE_DIR, ACTIVE_DIR, QUEUE_DIR
 
 logger = logging.getLogger(__name__)
-BINARY = os.path.join(BASE_DIR, "Engine", ".bin", "capture-audio")
+BINARY = CAPTURE_AUDIO_BIN
 LOCK_FILE = os.path.join(ACTIVE_DIR, ".lock")
 
 # Exit code the Swift binary uses to signal "Screen Recording permission

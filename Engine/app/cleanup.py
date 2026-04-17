@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 
 from . import state as state_mod
 from .recording_file import RecordingFile
-from .state import QUEUE_DIR, DONE_DIR
+from .environment import QUEUE_DIR, DONE_DIR
 
 logger = logging.getLogger(__name__)
 
