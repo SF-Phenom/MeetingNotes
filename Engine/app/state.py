@@ -54,6 +54,9 @@ class State:
     active_recording_path: str | None = None
     active_call_url: str | None = None
     active_call_source: str | None = None
+    # User-selected transcription backend. "parakeet" (default) or
+    # "apple_speech". Read by transcription_engine.get_*_engine factories.
+    transcription_engine: str = "parakeet"
 
     @classmethod
     def from_raw(cls, raw: dict) -> "State":
@@ -83,6 +86,7 @@ DEFAULT_STATE = {
     "active_recording_path": None,
     "active_call_url": None,
     "active_call_source": None,
+    "transcription_engine": "parakeet",
 }
 
 

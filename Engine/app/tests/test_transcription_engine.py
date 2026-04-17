@@ -8,15 +8,29 @@ from __future__ import annotations
 
 import pytest
 
+from app import state as state_mod
 from app import transcription_engine as te
 from app.transcription_engine import (
+    AppleSpeechBatchEngine,
     BatchEngine,
     ENGINE_ENV_VAR,
     ParakeetBatchEngine,
     RealtimeEngine,
     get_batch_engine,
     get_realtime_engine,
+    is_engine_available,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state(monkeypatch):
+    """Default the on-disk state to a clean dict so engine resolution
+    falls through to env var (or DEFAULT_ENGINE) per test.
+
+    Without this, tests inherit whatever transcription_engine the user
+    last selected in their real state.json — flaky.
+    """
+    monkeypatch.setattr(state_mod, "load", lambda: dict(state_mod.DEFAULT_STATE))
 
 
 class _FakeBatch:
@@ -83,6 +97,70 @@ class TestFactory:
             get_batch_engine()
         assert "whisperkit" in str(excinfo.value)
         assert ENGINE_ENV_VAR in str(excinfo.value)
+
+    def test_state_preference_used_when_env_unset(self, monkeypatch):
+        """With no env var, the engine comes from state.json."""
+        monkeypatch.delenv(ENGINE_ENV_VAR, raising=False)
+        monkeypatch.setattr(
+            state_mod, "load",
+            lambda: {**state_mod.DEFAULT_STATE, "transcription_engine": "apple_speech"},
+        )
+        assert isinstance(get_batch_engine(), AppleSpeechBatchEngine)
+
+    def test_env_overrides_state_preference(self, monkeypatch):
+        """Env var wins over state — for debugging / A/B."""
+        monkeypatch.setenv(ENGINE_ENV_VAR, "parakeet")
+        monkeypatch.setattr(
+            state_mod, "load",
+            lambda: {**state_mod.DEFAULT_STATE, "transcription_engine": "apple_speech"},
+        )
+        assert isinstance(get_batch_engine(), ParakeetBatchEngine)
+
+    def test_apple_speech_batch_via_env(self, monkeypatch):
+        monkeypatch.setenv(ENGINE_ENV_VAR, "apple_speech")
+        assert isinstance(get_batch_engine(), AppleSpeechBatchEngine)
+
+
+class TestIsEngineAvailable:
+    def test_parakeet_always_available(self):
+        assert is_engine_available("parakeet") is True
+
+    def test_apple_speech_checks_module(self, monkeypatch):
+        from app import speech_transcriber
+        monkeypatch.setattr(speech_transcriber, "is_available", lambda: True)
+        assert is_engine_available("apple_speech") is True
+        monkeypatch.setattr(speech_transcriber, "is_available", lambda: False)
+        assert is_engine_available("apple_speech") is False
+
+    def test_unknown_engine_unavailable(self):
+        assert is_engine_available("whisperkit") is False
+
+
+class TestAppleSpeechBatchAdapter:
+    def test_transcribe_delegates_to_module(self, monkeypatch):
+        from app import speech_transcriber
+
+        seen: list[str] = []
+
+        def fake_transcribe(path):
+            seen.append(path)
+            return "hello world"
+
+        monkeypatch.setattr(speech_transcriber, "transcribe_file", fake_transcribe)
+
+        result = AppleSpeechBatchEngine().transcribe("/tmp/foo.wav")
+        assert seen == ["/tmp/foo.wav"]
+        assert result.plain_text == "hello world"
+        # Apple Speech doesn't provide timestamps — mirror plain text.
+        assert result.timestamped_text == "hello world"
+        assert result.srt_path == ""
+
+    def test_empty_result_raises(self, monkeypatch):
+        from app import speech_transcriber
+        monkeypatch.setattr(speech_transcriber, "transcribe_file", lambda _p: None)
+        with pytest.raises(RuntimeError) as excinfo:
+            AppleSpeechBatchEngine().transcribe("/tmp/foo.wav")
+        assert "Dictation" in str(excinfo.value)
 
     def test_unknown_realtime_engine_raises(self, monkeypatch):
         monkeypatch.setenv(ENGINE_ENV_VAR, "parakeet-xl")

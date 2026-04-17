@@ -216,9 +216,14 @@ def is_call_still_active(source: str) -> bool:
     if not _process_running(proc_name):
         return False
 
-    # Process is running — use the right strategy per app
+    # Process is running — for window-count sources (Zoom), that's enough.
+    # The window-count >= 2 heuristic is unreliable on current Zoom versions:
+    # the count can drop to 1 mid-meeting (e.g. when sharing screen the
+    # main window is replaced by a floating control bar), causing false
+    # auto-stops. Zoom's process exits when the user leaves the meeting,
+    # so process-alive is the load-bearing signal.
     if source in _WINDOW_COUNT_SOURCES:
-        return _window_count(proc_name) >= _WINDOW_COUNT_THRESHOLD
+        return True
 
     title_keyword = _SOURCE_TO_TITLE.get(source)
     if title_keyword:

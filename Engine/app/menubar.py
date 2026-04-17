@@ -29,6 +29,7 @@ from app import recorder
 from app import calendar_lookup
 from app import checkin
 from app import cleanup
+from app import transcription_engine
 from app.call_detector_proxy import CallDetectorProxy
 from app.model_manager import ModelManager
 from app.orchestrator import CallOrchestrator
@@ -211,6 +212,9 @@ class MeetingNotesApp(rumps.App):
         # Model selection submenu
         items.append(self._build_model_submenu())
 
+        # Transcription engine submenu (Parakeet vs Apple Speech)
+        items.append(self._build_engine_submenu())
+
         # Retain recordings toggle
         retain_item = rumps.MenuItem(
             "Retain Recordings",
@@ -315,9 +319,20 @@ class MeetingNotesApp(rumps.App):
 
     @rumps.timer(1)
     def _recording_elapsed_tick(self, _sender) -> None:
-        """Update elapsed recording time in the menu every second."""
+        """Update elapsed recording time in the menu every second.
+
+        Also detects when the capture-audio Swift process has died while
+        we still believe a recording is in progress — without this, the UI
+        is stuck on the "Stop Recording" menu and the user can't do
+        anything useful until they quit.
+        """
         try:
             if not recorder.is_recording():
+                if self._recording_start is not None:
+                    logger.warning(
+                        "capture-audio process exited unexpectedly — recovering"
+                    )
+                    self._recover_from_dead_recording()
                 return
             if self._recording_start is None:
                 return
@@ -407,8 +422,42 @@ class MeetingNotesApp(rumps.App):
     def _manual_stop(self, _sender) -> None:
         """Manual 'Stop Recording' menu item."""
         if not recorder.is_recording():
+            # Process already gone but the UI still thinks we're recording —
+            # use the recovery path so the menu unsticks.
+            if self._recording_start is not None:
+                logger.warning("Manual stop with no live capture-audio — recovering")
+                self._recover_from_dead_recording()
             return
         self._do_stop_recording(notify=False)
+
+    def _recover_from_dead_recording(self) -> None:
+        """Clean up after the capture-audio process exits unexpectedly.
+
+        Stops the realtime transcriber, clears the recorder lock + state,
+        rebuilds the idle menu, and notifies the user. The recording's
+        partial WAV (if any) stays on disk and will be picked up by the
+        next pipeline sweep — we don't auto-transcribe it here because
+        the realtime engine had no chance to finalize and we don't know
+        whether the file is even valid.
+        """
+        try:
+            self._transcription.stop_realtime()
+        except Exception as e:  # noqa: BLE001 — recovery must always finish
+            logger.error("Error stopping realtime transcriber during recovery: %s", e)
+
+        self._recording_start = None
+
+        try:
+            recorder.stop_recording()
+        except Exception as e:  # noqa: BLE001
+            logger.error("Error clearing recorder state during recovery: %s", e)
+
+        self._build_idle_menu()
+        rumps.notification(
+            title="MeetingNotes",
+            subtitle="Recording stopped unexpectedly",
+            message="The audio capture process exited. Please try again.",
+        )
 
     def _quit(self, _sender) -> None:
         """Quit menu item — stop recording cleanly before exiting."""
@@ -547,6 +596,54 @@ class MeetingNotesApp(rumps.App):
                 count, "s" if count != 1 else ""
             ),
         )
+
+    # ── Transcription engine selection ────────────────────────────────────────
+
+    def _build_engine_submenu(self) -> rumps.MenuItem:
+        """Build the 'Transcription Engine' submenu (Parakeet vs Apple Speech).
+
+        Shows the persisted preference with a checkmark; "(not installed)"
+        suffix on Apple Speech when the SpeechTranscribe.app bundle hasn't
+        been built. The factory in transcription_engine reads the same
+        state field on each engine acquisition.
+        """
+        current = state_mod.load().get("transcription_engine", "parakeet")
+        submenu = rumps.MenuItem("Transcription Engine")
+
+        parakeet_item = rumps.MenuItem("Parakeet", callback=self._select_engine)
+        if current == "parakeet":
+            parakeet_item.state = 1
+        submenu.add(parakeet_item)
+
+        apple_label = "Apple Speech"
+        if not transcription_engine.is_engine_available("apple_speech"):
+            apple_label += " (not installed)"
+        apple_item = rumps.MenuItem(apple_label, callback=self._select_engine)
+        if current == "apple_speech":
+            apple_item.state = 1
+        submenu.add(apple_item)
+
+        return submenu
+
+    def _select_engine(self, sender) -> None:
+        """Persist the user's engine pick (or alert if Apple Speech missing)."""
+        title = sender.title
+        if title.startswith("Apple Speech"):
+            if not transcription_engine.is_engine_available("apple_speech"):
+                rumps.alert(
+                    title="Apple Speech Not Available",
+                    message=(
+                        "The SpeechTranscribe binary is not installed. "
+                        "Build it from Engine/SpeechTranscribe (see SETUP.md)."
+                    ),
+                )
+                return
+            engine = "apple_speech"
+        else:
+            engine = "parakeet"
+        state_mod.update(transcription_engine=engine)
+        logger.info("Transcription engine set to %s", engine)
+        self._build_idle_menu()
 
     # ── Live transcript viewer ────────────────────────────────────────────────
 

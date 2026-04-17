@@ -26,11 +26,13 @@ from app.transcriber import TranscriptionResult
 logger = logging.getLogger(__name__)
 
 
-# Environment override used to pick a non-default engine (e.g. for an
-# A/B comparison or a WhisperKit spike). If unset or set to "parakeet"
-# the current Parakeet-via-MLX backends are used.
+# Environment override for picking a non-default engine — wins over the
+# user's persisted preference (e.g. for an A/B comparison or a WhisperKit
+# spike). If unset, the value from state.json's ``transcription_engine``
+# field is used; that field defaults to "parakeet".
 ENGINE_ENV_VAR = "MEETINGNOTES_TRANSCRIPTION_ENGINE"
 DEFAULT_ENGINE = "parakeet"
+SUPPORTED_ENGINES = ("parakeet", "apple_speech")
 
 
 # ---------------------------------------------------------------------------
@@ -93,27 +95,88 @@ class ParakeetBatchEngine:
 
 
 # ---------------------------------------------------------------------------
-# Factory
+# Apple Speech adapters
 # ---------------------------------------------------------------------------
 
 
+class AppleSpeechBatchEngine:
+    """Adapter — wraps speech_transcriber.transcribe_file (NDJSON IPC).
+
+    Apple Speech returns plain text only, so timestamped_text mirrors
+    plain_text and srt_path is empty (same shape Parakeet uses when SRT
+    isn't generated).
+    """
+
+    def transcribe(self, wav_path: str) -> TranscriptionResult:
+        from app.speech_transcriber import transcribe_file
+        text = transcribe_file(wav_path)
+        if not text:
+            raise RuntimeError(
+                "Apple Speech returned no text — check that Dictation is "
+                "enabled in System Settings and the on-device model is "
+                "downloaded."
+            )
+        return TranscriptionResult(
+            plain_text=text,
+            timestamped_text=text,
+            duration_minutes=0,
+            srt_path="",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Availability + factory
+# ---------------------------------------------------------------------------
+
+
+def is_engine_available(name: str) -> bool:
+    """Return True if the named engine can run on this machine.
+
+    Parakeet is treated as always-available (it's a pip dependency,
+    failure to import surfaces at transcribe time). Apple Speech requires
+    the SpeechTranscribe.app bundle that setup builds — gate the menubar
+    UI on this.
+    """
+    name = name.strip().lower()
+    if name == "parakeet":
+        return True
+    if name == "apple_speech":
+        from app.speech_transcriber import is_available
+        return is_available()
+    return False
+
+
 def _resolve_engine_name() -> str:
-    """Read and normalize the engine name from the environment."""
-    return os.environ.get(ENGINE_ENV_VAR, DEFAULT_ENGINE).strip().lower()
+    """Pick an engine: env var override > state.json preference > default."""
+    env = os.environ.get(ENGINE_ENV_VAR, "").strip().lower()
+    if env:
+        return env
+    # Late import — keeps the module importable from contexts where state
+    # isn't on disk yet (notably tests that don't write a state.json).
+    try:
+        from app.state import load as load_state
+        return str(load_state().get("transcription_engine", DEFAULT_ENGINE)).strip().lower()
+    except Exception as e:  # noqa: BLE001 — engine selection must never crash startup
+        logger.warning("Could not read engine preference from state (%s); using default.", e)
+        return DEFAULT_ENGINE
 
 
 def _unknown_engine(name: str) -> "ValueError":
     return ValueError(
-        "Unknown transcription engine: {!r}. Supported: parakeet. "
-        "Set the {} env var to override.".format(name, ENGINE_ENV_VAR)
+        "Unknown transcription engine: {!r}. Supported: {}. "
+        "Set the {} env var to override.".format(
+            name, ", ".join(SUPPORTED_ENGINES), ENGINE_ENV_VAR,
+        )
     )
 
 
 def get_batch_engine() -> BatchEngine:
-    """Return the batch transcription engine selected by the environment."""
+    """Return the batch transcription engine selected by env or state."""
     name = _resolve_engine_name()
     if name == "parakeet":
         return ParakeetBatchEngine()
+    if name == "apple_speech":
+        return AppleSpeechBatchEngine()
     raise _unknown_engine(name)
 
 
@@ -124,4 +187,7 @@ def get_realtime_engine() -> RealtimeEngine:
         # Late import for the same reason as the batch adapter.
         from app.realtime_transcriber import RealtimeTranscriber
         return RealtimeTranscriber()
+    if name == "apple_speech":
+        from app.speech_transcriber import SpeechRealtimeTranscriber
+        return SpeechRealtimeTranscriber()
     raise _unknown_engine(name)

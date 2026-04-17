@@ -200,7 +200,32 @@ cp .build/release/CaptureAudio ~/MeetingNotes_RT/Engine/.bin/capture-audio
 
 ---
 
-## 11. Obsidian (Transcript Viewer)
+## 11. Apple Speech Transcription (Optional)
+
+Build the SpeechTranscribe binary for on-device Apple Speech recognition.
+Requires macOS 26+ and Xcode 26+ (Swift 6.2).
+
+```bash
+cd ~/MeetingNotes_RT/Engine/SpeechTranscribe
+swift build -c release
+```
+
+Install into the app bundle:
+
+```bash
+cp .build/release/SpeechTranscribe ~/MeetingNotes_RT/Engine/.bin/SpeechTranscribe.app/Contents/MacOS/speech-transcribe
+codesign --sign - --force --deep ~/MeetingNotes_RT/Engine/.bin/SpeechTranscribe.app
+```
+
+**Required macOS settings:**
+- System Settings → General → Keyboard → Dictation → **Enable Dictation** (downloads the on-device speech model)
+- On first run, grant Speech Recognition permission when prompted
+
+Select "Apple Speech" in the menubar → Transcription Engine submenu.
+
+---
+
+## 12. Obsidian (Transcript Viewer)
 
 Install [Obsidian](https://obsidian.md/) to browse and search your meeting transcripts:
 
@@ -218,7 +243,7 @@ Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes_RT/tr
 
 ---
 
-## 12. macOS Permissions
+## 13. macOS Permissions
 
 The app needs several permissions. macOS will prompt you the first time each is needed:
 
@@ -235,7 +260,7 @@ The app needs several permissions. macOS will prompt you the first time each is 
 
 ---
 
-## 13. Run the App
+## 14. Run the App
 
 ```bash
 cd ~/MeetingNotes_RT
@@ -249,7 +274,7 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 ---
 
-## 14. First-Run Checklist
+## 15. First-Run Checklist
 
 - [ ] Menu bar icon appears (🎙)
 - [ ] Edit `Settings/context.md` with your role, team, and meeting info

@@ -2,6 +2,8 @@
 Engine/.bin/
 Engine/CaptureAudio/.build/
 Engine/CaptureAudio/.swiftpm/
+Engine/SpeechTranscribe/.build/
+Engine/SpeechTranscribe/.swiftpm/
 
 # Recordings (large binary files, ephemeral)
 Engine/recordings/active/*.wav
@@ -44,5 +46,6 @@ dist/
 
 # User data (generated at runtime)
 Engine/state.json
+Engine/state.json.lock
 transcripts/
 projects/
