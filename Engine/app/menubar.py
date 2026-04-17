@@ -26,6 +26,7 @@ if _ENGINE_DIR not in sys.path:
 
 from app import state as state_mod
 from app import recorder
+from app import calendar_lookup
 from app import checkin
 from app import cleanup
 from app.call_detector_proxy import CallDetectorProxy
@@ -227,6 +228,19 @@ class MeetingNotesApp(rumps.App):
         else:
             items.append(
                 rumps.MenuItem("Add API Key", callback=self._add_api_key)
+            )
+
+        # Google Calendar authorization status. The OAuth flow blocks on
+        # the user's browser, so it's gated behind this explicit click —
+        # never triggered automatically from the transcription path.
+        if calendar_lookup.is_authorized():
+            items.append(rumps.MenuItem("Calendar \u2713"))
+        else:
+            items.append(
+                rumps.MenuItem(
+                    "Sign in to Google Calendar",
+                    callback=self._authorize_calendar,
+                )
             )
 
         # Screen Recording permission status — shown only when denied so
@@ -586,6 +600,40 @@ class MeetingNotesApp(rumps.App):
             subtitle="API key saved",
             message=message,
         )
+        self._build_idle_menu()
+
+    # ── Google Calendar ───────────────────────────────────────────────────────
+
+    def _authorize_calendar(self, _sender) -> None:
+        """Run the Google OAuth flow on a background thread.
+
+        ``flow.run_local_server`` blocks until the user completes the
+        browser dance, so it can't run on the main rumps thread (would
+        freeze the menubar) or on the transcription worker (would wedge
+        all pending recordings). Result is surfaced via the UI bridge.
+        """
+        import threading
+
+        def _worker() -> None:
+            ok, message = calendar_lookup.authorize_interactive()
+            self._ui_bridge.dispatch(lambda: self._on_calendar_auth_result(ok, message))
+
+        rumps.notification(
+            title="MeetingNotes",
+            subtitle="Opening Google sign-in",
+            message="Complete the consent flow in your browser.",
+        )
+        threading.Thread(target=_worker, name="calendar-auth", daemon=True).start()
+
+    def _on_calendar_auth_result(self, ok: bool, message: str) -> None:
+        if ok:
+            rumps.notification(
+                title="MeetingNotes",
+                subtitle="Calendar connected",
+                message=message,
+            )
+        else:
+            rumps.alert(title="Calendar sign-in failed", message=message)
         self._build_idle_menu()
 
     # ── Permissions ────────────────────────────────────────────────────────────

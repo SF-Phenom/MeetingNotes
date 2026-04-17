@@ -52,11 +52,19 @@ def _local_zoneinfo() -> ZoneInfo | None:
 # Authentication
 # ---------------------------------------------------------------------------
 
-def _get_credentials():
+def _get_credentials(*, interactive: bool = False):
     """
-    Load saved credentials or run the OAuth consent flow.
+    Load saved credentials, refreshing if needed.
 
-    Returns a valid Credentials object, or None if authentication fails.
+    When ``interactive`` is False (the default — pipeline path), a missing
+    or unrefreshable token causes this to return None rather than launch
+    the OAuth consent flow. ``flow.run_local_server`` blocks the calling
+    thread until the user completes the browser dance, which is fine for
+    a menu-triggered action but would wedge the transcription worker if
+    fired automatically. The user opts in via the "Sign in to Google
+    Calendar" menu item, which calls this with ``interactive=True``.
+
+    Returns a valid Credentials object, or None on any failure.
     """
     try:
         from google.oauth2.credentials import Credentials
@@ -81,10 +89,11 @@ def _get_credentials():
             logger.warning("Could not load saved token (%s); will re-authenticate.", e)
             creds = None
 
-    # Refresh or re-authenticate as needed
     if creds and creds.valid:
         return creds
 
+    # Token refresh is non-interactive (network call only) — safe to run
+    # on the pipeline path.
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
@@ -92,7 +101,7 @@ def _get_credentials():
             return creds
         except Exception as e:  # noqa: BLE001 — google.auth raises many types
             logger.warning(
-                "Token refresh failed (%s); deleting stale token and re-authenticating.", e
+                "Token refresh failed (%s); deleting stale token.", e
             )
             try:
                 os.remove(TOKEN_PATH)
@@ -100,7 +109,14 @@ def _get_credentials():
                 pass
             creds = None
 
-    # First-time or re-auth flow
+    # Below this point we'd need to launch the OAuth consent flow, which
+    # blocks. Bail out unless the caller explicitly opted in.
+    if not interactive:
+        logger.info(
+            "No valid Google Calendar token; sign in via the menubar to enable enrichment."
+        )
+        return None
+
     if not os.path.exists(CLIENT_SECRET_PATH):
         logger.error(
             "Google OAuth client secret not found at %s. "
@@ -117,6 +133,40 @@ def _get_credentials():
     except Exception as e:  # noqa: BLE001 — OAuth errors are diverse; disable on any
         logger.error("OAuth flow failed: %s", e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Authorization status (for the menubar)
+# ---------------------------------------------------------------------------
+
+def is_authorized() -> bool:
+    """Cheap check: do we already have a token file on disk?
+
+    Doesn't validate the token — that requires a network round-trip. The
+    pipeline path will discover validity (or refresh) the next time it
+    runs ``_get_credentials``. This is intended only for the menubar to
+    decide which label to show ("Sign in to Google Calendar" vs.
+    "Calendar Connected ✓").
+    """
+    return os.path.exists(TOKEN_PATH)
+
+
+def authorize_interactive() -> tuple[bool, str]:
+    """Run the OAuth flow and return (success, user-facing message).
+
+    Safe to call from a background thread — ``flow.run_local_server``
+    blocks for as long as the browser dance takes, so don't call this on
+    the main rumps thread.
+    """
+    if not os.path.exists(CLIENT_SECRET_PATH):
+        return False, (
+            f"OAuth client secret not found at {CLIENT_SECRET_PATH}. "
+            "See README for setup instructions."
+        )
+    creds = _get_credentials(interactive=True)
+    if creds is None:
+        return False, "Authorization failed — see logs for details."
+    return True, "Calendar enrichment is now active for new recordings."
 
 
 def _save_token(creds) -> None:
