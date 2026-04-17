@@ -7,7 +7,7 @@
 Double-click `Engine/setup.command` in Finder, or run it from Terminal:
 
 ```bash
-cd ~/MeetingNotes_RT
+cd ~/MeetingNotes
 ./Engine/setup.command
 ```
 
@@ -75,7 +75,7 @@ Should print `Python 3.12.x`.
 Create an isolated environment so packages don't conflict with your system:
 
 ```bash
-cd ~/MeetingNotes_RT
+cd ~/MeetingNotes
 python3.12 -m venv Engine/.venv
 source Engine/.venv/bin/activate
 ```
@@ -89,7 +89,7 @@ pip install -r Engine/requirements.txt
 **Every time you open a new terminal** to work with MeetingNotes, activate the environment first:
 
 ```bash
-source ~/MeetingNotes_RT/Engine/.venv/bin/activate
+source ~/MeetingNotes/Engine/.venv/bin/activate
 ```
 
 ---
@@ -164,14 +164,14 @@ Auto-populates meeting name and participants from your Google Calendar. If you s
 **Place the credential file:**
 
 ```bash
-mkdir -p ~/MeetingNotes_RT/Engine/.credentials
-cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes_RT/Engine/.credentials/google_oauth_client.json
+mkdir -p ~/MeetingNotes/Engine/.credentials
+cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes/Engine/.credentials/google_oauth_client.json
 ```
 
 **Authenticate** (one-time — opens a browser window):
 
 ```bash
-cd ~/MeetingNotes_RT/Engine
+cd ~/MeetingNotes/Engine
 source .venv/bin/activate
 python3 -c "
 from app.calendar_lookup import _get_credentials
@@ -187,16 +187,16 @@ The token is saved to `Engine/.credentials/google_token.json` and auto-refreshes
 ## 10. Build the Swift Audio Capture Binary
 
 ```bash
-cd ~/MeetingNotes_RT/Engine/CaptureAudio
+cd ~/MeetingNotes/Engine/CaptureAudio
 swift build -c release
 ```
 
 Install the binary:
 
 ```bash
-mkdir -p ~/MeetingNotes_RT/Engine/.bin
-cp .build/release/CaptureAudio ~/MeetingNotes_RT/Engine/.bin/capture-audio
-codesign -s - --force ~/MeetingNotes_RT/Engine/.bin/capture-audio
+mkdir -p ~/MeetingNotes/Engine/.bin
+cp .build/release/CaptureAudio ~/MeetingNotes/Engine/.bin/capture-audio
+codesign -s - --force ~/MeetingNotes/Engine/.bin/capture-audio
 ```
 
 The `codesign` step replaces the linker-provided signature with a proper ad-hoc
@@ -212,15 +212,15 @@ Build the SpeechTranscribe binary for on-device Apple Speech recognition.
 Requires macOS 26+ and Xcode 26+ (Swift 6.2).
 
 ```bash
-cd ~/MeetingNotes_RT/Engine/SpeechTranscribe
+cd ~/MeetingNotes/Engine/SpeechTranscribe
 swift build -c release
 ```
 
 Install into the app bundle:
 
 ```bash
-cp .build/release/SpeechTranscribe ~/MeetingNotes_RT/Engine/.bin/SpeechTranscribe.app/Contents/MacOS/speech-transcribe
-codesign --sign - --force --deep ~/MeetingNotes_RT/Engine/.bin/SpeechTranscribe.app
+cp .build/release/SpeechTranscribe ~/MeetingNotes/Engine/.bin/SpeechTranscribe.app/Contents/MacOS/speech-transcribe
+codesign --sign - --force --deep ~/MeetingNotes/Engine/.bin/SpeechTranscribe.app
 ```
 
 **Required macOS settings:**
@@ -242,10 +242,10 @@ brew install --cask obsidian
 Create the vault:
 
 ```bash
-mkdir -p ~/MeetingNotes_RT/transcripts/.obsidian
+mkdir -p ~/MeetingNotes/transcripts/.obsidian
 ```
 
-Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes_RT/transcripts`.
+Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes/transcripts`.
 
 ---
 
@@ -271,7 +271,7 @@ The app needs several permissions. macOS will prompt you the first time each is 
 ## 14. Run the App
 
 ```bash
-cd ~/MeetingNotes_RT
+cd ~/MeetingNotes
 source Engine/.venv/bin/activate
 python Engine/app/menubar.py
 ```
@@ -299,7 +299,7 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MEETINGNOTES_HOME` | `~/MeetingNotes_RT` | Base directory for the project |
+| `MEETINGNOTES_HOME` | `~/MeetingNotes` | Base directory for the project |
 | `ANTHROPIC_API_KEY` | (none) | Claude API key for summarization |
 
 ---
@@ -310,7 +310,7 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 **Menu bar icon doesn't appear:** Make sure your virtual environment is activated (`source Engine/.venv/bin/activate`) and rumps is installed (`pip list | grep rumps`).
 
-**No audio in recording:** Check System Settings → Sound → Input. System audio capture requires the "Audio Capture" permission (System Settings → Privacy & Security → Audio Capture) — ensure MeetingNotes is enabled there. If you only see Terminal / python3.12 in the list, the binary is missing its ad-hoc signature: re-run `Engine/setup.command` or `codesign -s - --force ~/MeetingNotes_RT/Engine/.bin/capture-audio`.
+**No audio in recording:** Check System Settings → Sound → Input. System audio capture requires the "Audio Capture" permission (System Settings → Privacy & Security → Audio Capture) — ensure MeetingNotes is enabled there. If you only see Terminal / python3.12 in the list, the binary is missing its ad-hoc signature: re-run `Engine/setup.command` or `codesign -s - --force ~/MeetingNotes/Engine/.bin/capture-audio`.
 
 **Swift binary won't compile:** Ensure Xcode Command Line Tools are installed. Requires macOS 14+.
 

@@ -1,7 +1,7 @@
 """Pytest configuration for MeetingNotes tests.
 
 Ensures the `app` package is importable regardless of where pytest is invoked
-from, and isolates tests from the user's real ~/MeetingNotes_RT installation
+from, and isolates tests from the user's real ~/MeetingNotes installation
 by pointing MEETINGNOTES_HOME at a tmp directory before any app module is
 imported.
 """
