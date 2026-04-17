@@ -122,8 +122,16 @@ def _write_transcript(content: str, date_str: str, title: str) -> str:
         filename = f"{date_str}_{slug}_{suffix}.md"
         out_path = os.path.join(out_dir, filename)
 
-    with open(out_path, "w", encoding="utf-8") as f:
+    # Atomic write: a crash mid-write would otherwise leave the user with
+    # an empty or half-written transcript at a name they'll trust on
+    # reopen. Write to a sibling .tmp, fsync, then rename — POSIX rename
+    # is atomic on the same filesystem.
+    tmp_path = out_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, out_path)
 
     logger.info("Transcript written to %s", out_path)
     return out_path
