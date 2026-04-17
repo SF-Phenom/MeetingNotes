@@ -142,10 +142,15 @@ class TranscriptionManager:
     ) -> None:
         succeeded = 0
         failed = 0
+        too_short = 0
         fell_back = False
         last_path: str | None = None
         exported_total = 0
         export_errors: list[str] = []
+        # Per-iteration flag: pipeline fires on_too_short before returning None,
+        # so we distinguish "skipped because too short" from "failed for real"
+        # without changing the pipeline's return type.
+        saw_too_short = False
 
         def _mark_fallback() -> None:
             nonlocal fell_back
@@ -156,8 +161,13 @@ class TranscriptionManager:
             exported_total += result.exported_count
             export_errors.extend(result.errors)
 
+        def _mark_too_short() -> None:
+            nonlocal saw_too_short
+            saw_too_short = True
+
         try:
             for i, wav_path in enumerate(wav_paths):
+                saw_too_short = False
                 try:
                     logger.info("Transcribing: %s", os.path.basename(wav_path))
                     # Only the first file gets pre-transcribed text (from realtime).
@@ -167,10 +177,13 @@ class TranscriptionManager:
                         pre_transcribed_text=pre_text,
                         on_summary_fallback=_mark_fallback,
                         on_export=_record_export,
+                        on_too_short=_mark_too_short,
                     )
                     if result:
                         succeeded += 1
                         last_path = result
+                    elif saw_too_short:
+                        too_short += 1
                     else:
                         failed += 1
                 except Exception as e:
@@ -225,6 +238,13 @@ class TranscriptionManager:
             )
             self._ui_bridge.dispatch(
                 lambda msg=failed_msg: self._notify("Transcription errors", msg)
+            )
+        if too_short > 0:
+            too_short_msg = "{} recording{} under 16 sec; nothing to transcribe".format(
+                too_short, "s" if too_short > 1 else "",
+            )
+            self._ui_bridge.dispatch(
+                lambda msg=too_short_msg: self._notify("Recording too short", msg)
             )
         if succeeded > 0 and checkin.should_trigger_checkin():
             self._ui_bridge.dispatch(

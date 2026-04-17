@@ -138,12 +138,24 @@ def _write_transcript(content: str, date_str: str, title: str) -> str:
 
 # --- Public API --------------------------------------------------------------
 
+def _remove_if_exists(path: str) -> None:
+    """Best-effort unlink — the caller's OK with the file not being there."""
+    try:
+        os.remove(path)
+        logger.info("Removed: %s", path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logger.warning("Could not remove %s: %s", path, e)
+
+
 def process_recording(
     wav_path: str,
     pre_transcribed_text: str | None = None,
     *,
     on_summary_fallback: Callable[[], None] | None = None,
     on_export: Callable[[ExportResult], None] | None = None,
+    on_too_short: Callable[[], None] | None = None,
 ) -> str | None:
     """
     Run the full transcription pipeline for a .wav file.
@@ -161,6 +173,12 @@ def process_recording(
             step 8.5 — only fires when an exporter backend is configured
             (i.e. result.attempted is True). Used by the menubar to
             notify "N items added to Reminders" or surface errors.
+        on_too_short: Optional zero-arg callback fired when the recording
+            was shorter than Parakeet's 16-sec realtime chunk threshold
+            (so pre_transcribed_text came in empty). The pipeline deletes
+            the WAV + .live.txt sidecar and returns None; the callback
+            lets the menubar show a quiet "too short" notice instead of
+            the scary "Transcription errors" one.
 
     Returns:
         Absolute path to the written .md transcript, or None on failure.
@@ -215,9 +233,19 @@ def process_recording(
         from .transcriber import TranscriptionResult
         if not pre_transcribed_text:
             logger.warning(
-                "Pre-transcribed text is empty — realtime transcriber produced "
-                "no output (recording may have been too short). Skipping pipeline."
+                "Pre-transcribed text is empty — recording was under Parakeet's "
+                "16-sec realtime chunk threshold. Deleting WAV + .live.txt and "
+                "skipping pipeline."
             )
+            # Nothing to transcribe = nothing to recover. Clean up so the
+            # recording doesn't pile up in queue/ indefinitely.
+            _remove_if_exists(wav_path)
+            _remove_if_exists(os.path.splitext(wav_path)[0] + ".live.txt")
+            if on_too_short is not None:
+                try:
+                    on_too_short()
+                except Exception as cb_err:  # noqa: BLE001 — UI hook must never break the pipeline
+                    logger.warning("on_too_short callback raised: %s", cb_err)
             return None
         logger.info("Using pre-transcribed text from realtime mode (%d chars)", len(pre_transcribed_text))
         transcription = TranscriptionResult(

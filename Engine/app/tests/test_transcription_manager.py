@@ -256,6 +256,90 @@ class TestBatchSignals:
 
         assert ("Transcription errors", "1 recording failed — check logs") in notifications
 
+    def test_too_short_notification_instead_of_error(self, monkeypatch, notify_log, rebuild_log):
+        """When pipeline fires on_too_short, the manager emits the quiet
+        'Recording too short' notification and does NOT count it toward the
+        scary 'Transcription errors' bucket."""
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+
+        def _pipeline(wav_path, pre_transcribed_text=None, **kwargs):
+            cb = kwargs.get("on_too_short")
+            if cb is not None:
+                cb()
+            return None
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/short.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        subtitles = [sub for sub, _ in notifications]
+        assert "Recording too short" in subtitles
+        assert "Transcription errors" not in subtitles
+
+    def test_too_short_and_failure_emit_separately(self, monkeypatch, notify_log, rebuild_log):
+        """Mixed batch: one too-short + one real failure should each get their
+        own notification — not lumped into one bucket."""
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+
+        call_idx = iter(range(2))
+
+        def _pipeline(wav_path, pre_transcribed_text=None, **kwargs):
+            n = next(call_idx)
+            if n == 0:
+                cb = kwargs.get("on_too_short")
+                if cb is not None:
+                    cb()
+            # Both calls return None — first is too-short, second is a "real"
+            # failure. The manager should distinguish them via the callback.
+            return None
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/short.wav", "/tmp/broken.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        subtitles = [sub for sub, _ in notifications]
+        assert "Recording too short" in subtitles
+        assert "Transcription errors" in subtitles
+        # And neither lumps the count.
+        failed_msgs = [m for s, m in notifications if s == "Transcription errors"]
+        assert failed_msgs == ["1 recording failed — check logs"]
+        too_short_msgs = [m for s, m in notifications if s == "Recording too short"]
+        assert too_short_msgs == ["1 recording under 16 sec; nothing to transcribe"]
+
+    def test_too_short_pluralizes_message(self, monkeypatch, notify_log, rebuild_log):
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+
+        def _pipeline(wav_path, pre_transcribed_text=None, **kwargs):
+            cb = kwargs.get("on_too_short")
+            if cb is not None:
+                cb()
+            return None
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/a.wav", "/tmp/b.wav", "/tmp/c.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        too_short_msgs = [m for s, m in notifications if s == "Recording too short"]
+        assert too_short_msgs == ["3 recordings under 16 sec; nothing to transcribe"]
+
     def test_summary_fallback_notification(self, monkeypatch, notify_log, rebuild_log):
         """When pipeline fires on_summary_fallback, the user gets a separate
         'used Ollama' notification so the model degradation isn't silent."""
