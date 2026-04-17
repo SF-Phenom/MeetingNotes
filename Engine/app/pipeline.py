@@ -22,6 +22,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from typing import Callable
 
 from . import state as state_mod
 from .audio_mixer import mix_to, system_path_for
@@ -132,6 +133,8 @@ def _write_transcript(content: str, date_str: str, title: str) -> str:
 def process_recording(
     wav_path: str,
     pre_transcribed_text: str | None = None,
+    *,
+    on_summary_fallback: Callable[[], None] | None = None,
 ) -> str | None:
     """
     Run the full transcription pipeline for a .wav file.
@@ -140,6 +143,11 @@ def process_recording(
         wav_path: Path to a .wav file in recordings/queue/.
         pre_transcribed_text: If provided (from realtime transcription), skip
             the transcription step and use this text directly.
+        on_summary_fallback: Optional zero-arg callback fired when the
+            summarizer was in automatic mode and fell back from Claude to
+            Ollama. Used by the menubar to surface the degradation —
+            otherwise the user has no idea their summary came from a
+            local model.
 
     Returns:
         Absolute path to the written .md transcript, or None on failure.
@@ -255,6 +263,16 @@ def process_recording(
             metadata=metadata,
         )
         logger.info("Summarization done: title=%r", summary.title)
+        if summary.fell_back:
+            logger.warning(
+                "Summarizer fell back from Claude to Ollama (%s).",
+                summary.model_used,
+            )
+            if on_summary_fallback is not None:
+                try:
+                    on_summary_fallback()
+                except Exception as cb_err:  # noqa: BLE001 — UI hook must never break the pipeline
+                    logger.warning("on_summary_fallback callback raised: %s", cb_err)
     except (RuntimeError, ValueError) as e:
         logger.error(
             "Summarization failed (will save transcript without summary): %s", e

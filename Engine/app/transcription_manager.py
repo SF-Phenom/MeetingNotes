@@ -142,7 +142,13 @@ class TranscriptionManager:
     ) -> None:
         succeeded = 0
         failed = 0
+        fell_back = False
         last_path: str | None = None
+
+        def _mark_fallback() -> None:
+            nonlocal fell_back
+            fell_back = True
+
         try:
             for i, wav_path in enumerate(wav_paths):
                 try:
@@ -150,7 +156,9 @@ class TranscriptionManager:
                     # Only the first file gets pre-transcribed text (from realtime).
                     pre_text = pre_transcribed_text if i == 0 else None
                     result = pipeline.process_recording(
-                        wav_path, pre_transcribed_text=pre_text,
+                        wav_path,
+                        pre_transcribed_text=pre_text,
+                        on_summary_fallback=_mark_fallback,
                     )
                     if result:
                         succeeded += 1
@@ -179,6 +187,13 @@ class TranscriptionManager:
             message = os.path.basename(last_path) if last_path else ""
             self._ui_bridge.dispatch(
                 lambda sub=subtitle, msg=message: self._notify(sub, msg)
+            )
+        if fell_back:
+            self._ui_bridge.dispatch(
+                lambda: self._notify(
+                    "Summarized with local model",
+                    "Claude was unavailable; used Ollama. Quality may differ.",
+                )
             )
         if failed > 0:
             failed_msg = "{} recording{} failed — check logs".format(

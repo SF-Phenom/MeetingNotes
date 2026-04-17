@@ -163,7 +163,7 @@ class TestBatchFlag:
         _, notify = notify_log
         _, rebuild = rebuild_log
 
-        def _pipeline(wav_path, pre_transcribed_text=None):
+        def _pipeline(wav_path, pre_transcribed_text=None, **_kwargs):
             return "/tmp/out.md"
 
         monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
@@ -177,7 +177,7 @@ class TestBatchFlag:
         _, notify = notify_log
         _, rebuild = rebuild_log
 
-        def _pipeline(wav_path, pre_transcribed_text=None):
+        def _pipeline(wav_path, pre_transcribed_text=None, **_kwargs):
             raise RuntimeError("simulate pipeline crash")
 
         monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
@@ -196,7 +196,7 @@ class TestBatchFlag:
         block = threading.Event()
         release = threading.Event()
 
-        def _pipeline(wav_path, pre_transcribed_text=None):
+        def _pipeline(wav_path, pre_transcribed_text=None, **_kwargs):
             block.set()
             release.wait(timeout=5)
             return "/tmp/out.md"
@@ -223,7 +223,7 @@ class TestBatchSignals:
         rebuilds, rebuild = rebuild_log
         monkeypatch.setattr(
             tm_mod.pipeline, "process_recording",
-            lambda p, pre_transcribed_text=None: "/tmp/out.md",
+            lambda p, pre_transcribed_text=None, **_kwargs: "/tmp/out.md",
         )
         monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
 
@@ -244,7 +244,7 @@ class TestBatchSignals:
         _, rebuild = rebuild_log
         monkeypatch.setattr(
             tm_mod.pipeline, "process_recording",
-            lambda p, pre_transcribed_text=None: None,  # pipeline returned None
+            lambda p, pre_transcribed_text=None, **_kwargs: None,
         )
         monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
 
@@ -256,12 +256,56 @@ class TestBatchSignals:
 
         assert ("Transcription errors", "1 recording failed — check logs") in notifications
 
+    def test_summary_fallback_notification(self, monkeypatch, notify_log, rebuild_log):
+        """When pipeline fires on_summary_fallback, the user gets a separate
+        'used Ollama' notification so the model degradation isn't silent."""
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+
+        def _pipeline(wav_path, pre_transcribed_text=None, **kwargs):
+            cb = kwargs.get("on_summary_fallback")
+            if cb is not None:
+                cb()
+            return "/tmp/out.md"
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/a.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        subtitles = [sub for sub, _ in notifications]
+        assert "Summarized with local model" in subtitles
+
+    def test_no_fallback_notification_when_callback_unused(
+        self, monkeypatch, notify_log, rebuild_log,
+    ):
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+        monkeypatch.setattr(
+            tm_mod.pipeline, "process_recording",
+            lambda p, pre_transcribed_text=None, **_kwargs: "/tmp/out.md",
+        )
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/a.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        subtitles = [sub for sub, _ in notifications]
+        assert "Summarized with local model" not in subtitles
+
     def test_checkin_notification(self, monkeypatch, notify_log, rebuild_log):
         notifications, notify = notify_log
         _, rebuild = rebuild_log
         monkeypatch.setattr(
             tm_mod.pipeline, "process_recording",
-            lambda p, pre_transcribed_text=None: "/tmp/out.md",
+            lambda p, pre_transcribed_text=None, **_kwargs: "/tmp/out.md",
         )
         monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: True)
 
@@ -278,7 +322,7 @@ class TestBatchSignals:
         _, rebuild = rebuild_log
         seen: list[tuple[str, str | None]] = []
 
-        def _pipeline(wav_path, pre_transcribed_text=None):
+        def _pipeline(wav_path, pre_transcribed_text=None, **_kwargs):
             seen.append((wav_path, pre_transcribed_text))
             return "/tmp/out.md"
 

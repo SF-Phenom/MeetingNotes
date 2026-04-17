@@ -47,6 +47,10 @@ class SummaryResult:
     key_decisions: list[str]
     raw_json: dict = field(default_factory=dict)
     model_used: str = ""  # which model actually produced this result
+    # True when automatic mode tried Claude, failed, and fell back to Ollama.
+    # The pipeline surfaces this to the UI so the user knows their summary
+    # came from the local model — quality differs noticeably.
+    fell_back: bool = False
 
 
 # --- Model preference --------------------------------------------------------
@@ -405,12 +409,14 @@ def summarize(
                 "Claude failed in automatic mode, falling back to Ollama: %s", e
             )
             try:
-                return _summarize_ollama(transcript_text, context_md, metadata)
+                fallback = _summarize_ollama(transcript_text, context_md, metadata)
             except Exception as ollama_err:  # noqa: BLE001 — composite report
                 raise RuntimeError(
                     f"Both Claude and Ollama failed. "
                     f"Claude: {e} | Ollama: {ollama_err}"
                 ) from ollama_err
+            fallback.fell_back = True
+            return fallback
 
     # Specific Ollama model name
     return _summarize_ollama(transcript_text, context_md, metadata, model=pref)

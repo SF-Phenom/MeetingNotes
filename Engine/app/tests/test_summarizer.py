@@ -123,3 +123,42 @@ class TestValidateApiKey:
         ok, msg = validate_api_key("sk-ant-offline")
         assert ok is True
         assert "not validated" in msg.lower()
+
+
+class TestSummarizeFallback:
+    """Automatic mode must mark the SummaryResult so the UI can surface
+    the Claude→Ollama degradation."""
+
+    def _ollama_result(self) -> summarizer.SummaryResult:
+        return summarizer.SummaryResult(
+            title="t", summary="s", action_items=[],
+            projects_mentioned=[], key_decisions=[],
+            model_used="ollama:qwen3:4b",
+        )
+
+    def test_fell_back_set_on_claude_failure(self, monkeypatch):
+        monkeypatch.setattr(summarizer, "_model_preference", "automatic")
+        monkeypatch.setattr(
+            summarizer, "_summarize_claude",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("claude down")),
+        )
+        monkeypatch.setattr(
+            summarizer, "_summarize_ollama",
+            lambda *a, **k: self._ollama_result(),
+        )
+        result = summarizer.summarize("text", "context", {})
+        assert result.fell_back is True
+        assert result.model_used.startswith("ollama:")
+
+    def test_fell_back_false_when_claude_succeeds(self, monkeypatch):
+        monkeypatch.setattr(summarizer, "_model_preference", "automatic")
+        claude_result = summarizer.SummaryResult(
+            title="t", summary="s", action_items=[],
+            projects_mentioned=[], key_decisions=[],
+            model_used="claude:sonnet",
+        )
+        monkeypatch.setattr(
+            summarizer, "_summarize_claude", lambda *a, **k: claude_result,
+        )
+        result = summarizer.summarize("text", "context", {})
+        assert result.fell_back is False
