@@ -1,6 +1,6 @@
-import Foundation
+import CoreAudio
 import Darwin
-import ScreenCaptureKit
+import Foundation
 
 // MARK: - Argument Parsing
 
@@ -8,7 +8,7 @@ func usage() -> Never {
     fputs("""
         Usage:
             CaptureAudio start --output /path/to/file.wav
-            CaptureAudio check-screen-recording
+            CaptureAudio check-audio-capture
         \n
         """, stderr)
     exit(1)
@@ -16,32 +16,30 @@ func usage() -> Never {
 
 let args = CommandLine.arguments
 
-// Permission pre-flight subcommand. Exits 0 if Screen Recording is granted,
-// 10 if denied, non-zero (other) for unexpected failures. Called by the
-// Python recorder at menubar startup so the UI can surface a clear message
-// instead of silently falling back to mic-only mode.
+// Permission pre-flight subcommand. Exits 0 if Audio Capture access is
+// granted (Process Tap creation succeeds), 10 if it's denied, other non-zero
+// for unexpected failures. Called by the Python recorder at menubar startup
+// so the UI can surface a clear message instead of silently falling back to
+// mic-only mode.
 let PERMISSION_DENIED_EXIT_CODE: Int32 = 10
-if args.count >= 2 && args[1] == "check-screen-recording" {
-    if #available(macOS 13.0, *) {
-        let sem = DispatchSemaphore(value: 0)
-        var success = false
-        Task {
-            do {
-                _ = try await SCShareableContent.excludingDesktopWindows(
-                    false, onScreenWindowsOnly: false
-                )
-                success = true
-            } catch {
-                fputs("Screen Recording permission check failed: \(error)\n", stderr)
-            }
-            sem.signal()
-        }
-        _ = sem.wait(timeout: .now() + 5)
-        exit(success ? 0 : PERMISSION_DENIED_EXIT_CODE)
-    } else {
-        fputs("ScreenCaptureKit requires macOS 13+\n", stderr)
+if args.count >= 2 && args[1] == "check-audio-capture" {
+    // Minimal round-trip: create a tap excluding our own process, destroy it.
+    let selfPID = ProcessInfo.processInfo.processIdentifier
+    guard let selfObjID = pidToAudioObjectID(selfPID) else {
+        fputs("check-audio-capture: could not resolve self pid\n", stderr)
         exit(PERMISSION_DENIED_EXIT_CODE)
     }
+    let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [selfObjID])
+    desc.isPrivate = true
+    desc.name = "MeetingNotes permission probe"
+    var tap: AudioObjectID = kAudioObjectUnknown
+    let err = AudioHardwareCreateProcessTap(desc, &tap)
+    if err == noErr, tap != kAudioObjectUnknown {
+        _ = AudioHardwareDestroyProcessTap(tap)
+        exit(0)
+    }
+    fputs("check-audio-capture: AudioHardwareCreateProcessTap failed \(fmtStatus(err))\n", stderr)
+    exit(PERMISSION_DENIED_EXIT_CODE)
 }
 
 guard args.count >= 4,
@@ -58,22 +56,14 @@ let lockDir = (NSHomeDirectory() as NSString)
     .appendingPathComponent("MeetingNotes_RT/Engine/recordings/active")
 let lockPath = (lockDir as NSString).appendingPathComponent(".lock")
 
-// MARK: - WAV Writer
+// MARK: - WAV Writer (single mixed output)
 
-// Derive a sibling path for the system-audio track.
-// e.g. /…/manual_2026-04-16_15-20.wav → /…/manual_2026-04-16_15-20.sys.wav
-let outputBase = (outputPath as NSString).deletingPathExtension
-let outputExt = (outputPath as NSString).pathExtension
-let systemOutputPath = outputBase + ".sys." + (outputExt.isEmpty ? "wav" : outputExt)
-
-let micWriter: WAVWriter
-let systemWriter: WAVWriter
+let mixedWriter: WAVWriter
 do {
     let outputDir = (outputPath as NSString).deletingLastPathComponent
     try FileManager.default.createDirectory(atPath: outputDir,
                                             withIntermediateDirectories: true)
-    micWriter = try WAVWriter(path: outputPath)
-    systemWriter = try WAVWriter(path: systemOutputPath)
+    mixedWriter = try WAVWriter(path: outputPath)
 } catch {
     fputs("Failed to open output file: \(error)\n", stderr)
     exit(1)
@@ -92,13 +82,12 @@ do {
 
 // MARK: - Audio Capture
 
-let captureManager = AudioCaptureManager(micWriter: micWriter, systemWriter: systemWriter)
+let captureManager = AudioCaptureManager(mixedWriter: mixedWriter)
 
 do {
     try captureManager.start()
 } catch {
     fputs("Failed to start audio capture: \(error)\n", stderr)
-    // Clean up lock file before exit
     try? FileManager.default.removeItem(atPath: lockPath)
     exit(1)
 }
@@ -108,14 +97,9 @@ do {
 func shutdown() {
     captureManager.stop()
     do {
-        try micWriter.finalize()
+        try mixedWriter.finalize()
     } catch {
-        fputs("Warning: Failed to finalize mic WAV file: \(error)\n", stderr)
-    }
-    do {
-        try systemWriter.finalize()
-    } catch {
-        fputs("Warning: Failed to finalize system WAV file: \(error)\n", stderr)
+        fputs("Warning: Failed to finalize WAV file: \(error)\n", stderr)
     }
     try? FileManager.default.removeItem(atPath: lockPath)
     exit(0)
@@ -136,6 +120,5 @@ sigtermSource.resume()
 
 // MARK: - Run Loop
 
-fputs("CaptureAudio: recording mic to \(outputPath)\n", stderr)
-fputs("CaptureAudio: recording system to \(systemOutputPath)\n", stderr)
+fputs("CaptureAudio: recording mixed mic + system audio to \(outputPath)\n", stderr)
 RunLoop.main.run()

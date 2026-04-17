@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 BINARY = CAPTURE_AUDIO_BIN
 LOCK_FILE = os.path.join(ACTIVE_DIR, ".lock")
 
-# Exit code the Swift binary uses to signal "Screen Recording permission
-# denied" from the check-screen-recording subcommand.
-SCREEN_RECORDING_PERMISSION_DENIED = 10
+# Exit code the Swift binary uses to signal "Audio Capture permission
+# denied" from the check-audio-capture subcommand.
+AUDIO_CAPTURE_PERMISSION_DENIED = 10
 
 _process: subprocess.Popen | None = None
 
@@ -38,13 +38,13 @@ def _ensure_dirs() -> None:
     os.makedirs(QUEUE_DIR, exist_ok=True)
 
 
-def check_screen_recording_permission(timeout_secs: float = 8.0) -> bool:
-    """Probe the capture-audio binary for Screen Recording access.
+def check_audio_capture_permission(timeout_secs: float = 8.0) -> bool:
+    """Probe the capture-audio binary for Audio Capture (Process Tap) access.
 
-    Runs ``capture-audio check-screen-recording`` which calls
-    SCShareableContent at startup. Returns True when access is granted (or
-    when we can't probe and shouldn't block recording), False only on
-    explicit denial (exit code 10).
+    Runs ``capture-audio check-audio-capture`` which attempts to create a
+    CoreAudio Process Tap and immediately destroys it. Returns True when
+    creation succeeds (or when we can't probe and shouldn't block
+    recording), False only on explicit denial (exit code 10).
 
     The first call triggers macOS's "grant access" dialog; subsequent calls
     after denial return immediately. Re-checking happens at each menubar
@@ -59,28 +59,28 @@ def check_screen_recording_permission(timeout_secs: float = 8.0) -> bool:
 
     try:
         result = subprocess.run(
-            [BINARY, "check-screen-recording"],
+            [BINARY, "check-audio-capture"],
             capture_output=True,
             timeout=timeout_secs,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning("Could not probe Screen Recording permission: %s", e)
+        logger.warning("Could not probe Audio Capture permission: %s", e)
         return True
 
     if result.returncode == 0:
-        logger.info("Screen Recording permission: granted")
+        logger.info("Audio Capture permission: granted")
         return True
-    if result.returncode == SCREEN_RECORDING_PERMISSION_DENIED:
+    if result.returncode == AUDIO_CAPTURE_PERMISSION_DENIED:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         logger.warning(
-            "Screen Recording permission denied — system audio will not be "
+            "Audio Capture permission denied — system audio will not be "
             "captured. Grant access in System Settings → Privacy & Security "
-            "→ Screen Recording. Details: %s",
+            "→ Audio Capture (or equivalent). Details: %s",
             stderr,
         )
         return False
     logger.warning(
-        "capture-audio check-screen-recording exited %d: %s",
+        "capture-audio check-audio-capture exited %d: %s",
         result.returncode,
         result.stderr.decode("utf-8", errors="replace").strip(),
     )
@@ -91,8 +91,8 @@ def _kill_stray_capture_processes(exclude_pid: int | None = None) -> int:
     """
     SIGKILL any lingering capture-audio processes owned by the current user.
 
-    A stray process holds its ScreenCaptureKit stream open, which causes the
-    next capture-audio to hang during SCK setup and record mic only. The
+    A stray process holds its Process Tap / aggregate device open, which
+    can cause the next capture-audio to get confused during setup. The
     .lock file only tracks the most recent PID, so earlier zombies are
     invisible to orphan detection — scan ps directly.
     """

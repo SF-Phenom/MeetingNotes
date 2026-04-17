@@ -126,17 +126,17 @@ class MeetingNotesApp(rumps.App):
             restart=self._restart_after_update,
         )
 
-        # Probe Screen Recording permission once at startup. If denied, the
-        # menubar surfaces a persistent item with a link to System Settings
-        # instead of silently falling back to mic-only.
-        self._screen_recording_ok: bool = recorder.check_screen_recording_permission()
-        if not self._screen_recording_ok:
+        # Probe Audio Capture (Process Tap) permission once at startup. If
+        # denied, the menubar surfaces a persistent item with a link to
+        # System Settings instead of silently falling back to mic-only.
+        self._audio_capture_ok: bool = recorder.check_audio_capture_permission()
+        if not self._audio_capture_ok:
             # Queue a one-time notification — the drain timer fires once the
             # rumps runloop is active so it'll pop shortly after launch.
             self._ui_bridge.dispatch(lambda: rumps.notification(
                 title="MeetingNotes",
                 subtitle="System audio unavailable",
-                message="Grant Screen Recording in System Settings → Privacy.",
+                message="Grant Audio Capture in System Settings → Privacy.",
             ))
 
         # Setup precondition probe — load-bearing components only (the
@@ -270,12 +270,12 @@ class MeetingNotesApp(rumps.App):
                 ),
             ))
 
-        # Screen Recording permission status — shown only when denied so
+        # Audio Capture permission status — shown only when denied so
         # the user can jump straight to System Settings to grant it.
-        if not self._screen_recording_ok:
+        if not self._audio_capture_ok:
             items.append(rumps.MenuItem(
-                "⚠ System audio unavailable — grant Screen Recording",
-                callback=self._open_screen_recording_settings,
+                "⚠ System audio unavailable — grant Audio Capture",
+                callback=self._open_audio_capture_settings,
             ))
 
         items.extend([
@@ -802,12 +802,20 @@ class MeetingNotesApp(rumps.App):
 
     # ── Permissions ────────────────────────────────────────────────────────────
 
-    def _open_screen_recording_settings(self, _sender) -> None:
-        """Open the Screen Recording pane in System Settings."""
+    def _open_audio_capture_settings(self, _sender) -> None:
+        """Open Privacy & Security in System Settings.
+
+        macOS 14.2+ introduced Process Tap permission under a category
+        that is still being finalised across minor releases; opening the
+        Privacy root lets the user find whichever specific pane
+        ("Audio Capture", "System Audio Recording Only", etc.) their
+        version exposes. The exact URL will be pinned in Phase 4D once
+        we confirm the pane identifier on macOS 15 Sequoia.
+        """
         import subprocess as sp
         sp.Popen([
             "open",
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy",
         ])
 
     # ── Utilities ──────────────────────────────────────────────────────────────
