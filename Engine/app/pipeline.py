@@ -27,6 +27,7 @@ from typing import Callable
 from . import state as state_mod
 from .audio_mixer import mix_to, system_path_for
 from .calendar_lookup import enrich_metadata as _calendar_enrich
+from .exporter import ExportResult, export_action_items
 from .formatter import format_transcript, slugify
 from .recording_file import RecordingFile
 from .summarizer import summarize
@@ -135,6 +136,7 @@ def process_recording(
     pre_transcribed_text: str | None = None,
     *,
     on_summary_fallback: Callable[[], None] | None = None,
+    on_export: Callable[[ExportResult], None] | None = None,
 ) -> str | None:
     """
     Run the full transcription pipeline for a .wav file.
@@ -148,6 +150,10 @@ def process_recording(
             Ollama. Used by the menubar to surface the degradation —
             otherwise the user has no idea their summary came from a
             local model.
+        on_export: Optional callback receiving the ExportResult from
+            step 8.5 — only fires when an exporter backend is configured
+            (i.e. result.attempted is True). Used by the menubar to
+            notify "N items added to Reminders" or surface errors.
 
     Returns:
         Absolute path to the written .md transcript, or None on failure.
@@ -304,6 +310,31 @@ def process_recording(
     except OSError as e:
         logger.error("Failed to write transcript file: %s", e)
         return None
+
+    # Step 8.5: Export action items to the configured backend (best-effort).
+    #
+    # The transcript is already on disk — an export failure must not undo
+    # it. The dispatcher itself is no-op when backend is "disabled", so
+    # we always call it and let it decide. The callback only fires when a
+    # backend was actually attempted (so the UI stays quiet when the
+    # feature is off).
+    if summary is not None:
+        try:
+            export_result = export_action_items(
+                summary.action_items,
+                metadata={
+                    "title": summary.title,
+                    "source": source,
+                    "date_str": date_str,
+                },
+            )
+            if export_result.attempted and on_export is not None:
+                try:
+                    on_export(export_result)
+                except Exception as cb_err:  # noqa: BLE001 — UI hook must never break the pipeline
+                    logger.warning("on_export callback raised: %s", cb_err)
+        except Exception as exp_err:  # noqa: BLE001 — exporter failures are non-fatal
+            logger.warning("Exporter raised unexpectedly: %s", exp_err)
 
     # Step 9: Update state, then clean up recording.
     #

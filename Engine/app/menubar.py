@@ -29,6 +29,7 @@ from app import recorder
 from app import calendar_lookup
 from app import checkin
 from app import cleanup
+from app import exporter
 from app import transcription_engine
 from app.call_detector_proxy import CallDetectorProxy
 from app.model_manager import ModelManager
@@ -214,6 +215,9 @@ class MeetingNotesApp(rumps.App):
 
         # Transcription engine submenu (Parakeet vs Apple Speech)
         items.append(self._build_engine_submenu())
+
+        # Action-item exporter submenu (Disabled vs Apple Reminders)
+        items.append(self._build_exporter_submenu())
 
         # Retain recordings toggle
         retain_item = rumps.MenuItem(
@@ -643,6 +647,41 @@ class MeetingNotesApp(rumps.App):
             engine = "parakeet"
         state_mod.update(transcription_engine=engine)
         logger.info("Transcription engine set to %s", engine)
+        self._build_idle_menu()
+
+    # ── Action-item exporter selection ────────────────────────────────────────
+
+    def _build_exporter_submenu(self) -> rumps.MenuItem:
+        """Build the 'Action Items' submenu (Disabled vs configured backend)."""
+        current = exporter.get_backend_preference()
+        submenu = rumps.MenuItem("Action Items")
+
+        disabled_item = rumps.MenuItem("Disabled", callback=self._select_exporter)
+        if current == exporter.BACKEND_DISABLED:
+            disabled_item.state = 1
+        submenu.add(disabled_item)
+
+        reminders_item = rumps.MenuItem(
+            "Apple Reminders", callback=self._select_exporter,
+        )
+        if current == exporter.BACKEND_APPLE_REMINDERS:
+            reminders_item.state = 1
+        submenu.add(reminders_item)
+
+        return submenu
+
+    def _select_exporter(self, sender) -> None:
+        """Persist the exporter backend the user picked from the submenu."""
+        title = sender.title
+        if title == "Apple Reminders":
+            backend = exporter.BACKEND_APPLE_REMINDERS
+        else:
+            backend = exporter.BACKEND_DISABLED
+        try:
+            exporter.set_backend_preference(backend)
+        except ValueError as e:
+            rumps.alert(title="Exporter Setup Failed", message=str(e))
+            return
         self._build_idle_menu()
 
     # ── Live transcript viewer ────────────────────────────────────────────────

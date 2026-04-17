@@ -144,10 +144,17 @@ class TranscriptionManager:
         failed = 0
         fell_back = False
         last_path: str | None = None
+        exported_total = 0
+        export_errors: list[str] = []
 
         def _mark_fallback() -> None:
             nonlocal fell_back
             fell_back = True
+
+        def _record_export(result) -> None:
+            nonlocal exported_total
+            exported_total += result.exported_count
+            export_errors.extend(result.errors)
 
         try:
             for i, wav_path in enumerate(wav_paths):
@@ -159,6 +166,7 @@ class TranscriptionManager:
                         wav_path,
                         pre_transcribed_text=pre_text,
                         on_summary_fallback=_mark_fallback,
+                        on_export=_record_export,
                     )
                     if result:
                         succeeded += 1
@@ -193,6 +201,22 @@ class TranscriptionManager:
                 lambda: self._notify(
                     "Summarized with local model",
                     "Claude was unavailable; used Ollama. Quality may differ.",
+                )
+            )
+        if exported_total > 0:
+            self._ui_bridge.dispatch(
+                lambda n=exported_total: self._notify(
+                    "Action items exported",
+                    "{} item{} sent to your task system.".format(
+                        n, "s" if n != 1 else "",
+                    ),
+                )
+            )
+        if export_errors:
+            first = export_errors[0]
+            self._ui_bridge.dispatch(
+                lambda msg=first: self._notify(
+                    "Action item export failed", msg,
                 )
             )
         if failed > 0:

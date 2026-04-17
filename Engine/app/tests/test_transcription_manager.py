@@ -300,6 +300,96 @@ class TestBatchSignals:
         subtitles = [sub for sub, _ in notifications]
         assert "Summarized with local model" not in subtitles
 
+    def test_export_success_notification_aggregates_across_batch(
+        self, monkeypatch, notify_log, rebuild_log,
+    ):
+        """Multiple wavs in one batch should produce a single
+        'N items exported' notification summing across all of them."""
+        from app.exporter import BACKEND_APPLE_REMINDERS, ExportResult
+
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+
+        per_wav_counts = iter([2, 5])
+
+        def _pipeline(wav_path, pre_transcribed_text=None, **kwargs):
+            cb = kwargs.get("on_export")
+            if cb is not None:
+                cb(ExportResult(
+                    backend=BACKEND_APPLE_REMINDERS,
+                    exported_count=next(per_wav_counts),
+                ))
+            return "/tmp/out.md"
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/a.wav", "/tmp/b.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        export_subs = [(sub, msg) for sub, msg in notifications
+                       if sub == "Action items exported"]
+        assert len(export_subs) == 1
+        assert "7 items" in export_subs[0][1]
+
+    def test_export_error_surfaces_first_message(
+        self, monkeypatch, notify_log, rebuild_log,
+    ):
+        from app.exporter import BACKEND_APPLE_REMINDERS, ExportResult
+
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+
+        def _pipeline(wav_path, pre_transcribed_text=None, **kwargs):
+            cb = kwargs.get("on_export")
+            if cb is not None:
+                cb(ExportResult(
+                    backend=BACKEND_APPLE_REMINDERS,
+                    exported_count=0,
+                    errors=["osascript exited 1: -1728"],
+                ))
+            return "/tmp/out.md"
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/a.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        error_subs = [(sub, msg) for sub, msg in notifications
+                      if sub == "Action item export failed"]
+        assert len(error_subs) == 1
+        assert "1728" in error_subs[0][1]
+
+    def test_no_export_notification_when_callback_unused(
+        self, monkeypatch, notify_log, rebuild_log,
+    ):
+        """When the exporter is disabled, pipeline doesn't fire on_export
+        and the user sees no exporter-related notification at all."""
+        notifications, notify = notify_log
+        _, rebuild = rebuild_log
+        monkeypatch.setattr(
+            tm_mod.pipeline, "process_recording",
+            lambda p, pre_transcribed_text=None, **_kwargs: "/tmp/out.md",
+        )
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        bridge = UIBridge()
+        m = TranscriptionManager(bridge, rebuild, notify)
+        m.submit(["/tmp/a.wav"])
+        _wait_until(lambda: not m.is_transcribing)
+        bridge.drain()
+
+        subtitles = [sub for sub, _ in notifications]
+        assert "Action items exported" not in subtitles
+        assert "Action item export failed" not in subtitles
+
     def test_checkin_notification(self, monkeypatch, notify_log, rebuild_log):
         notifications, notify = notify_log
         _, rebuild = rebuild_log
