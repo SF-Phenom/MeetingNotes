@@ -14,7 +14,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.state import BASE_DIR
 
@@ -24,6 +25,27 @@ CLIENT_SECRET_PATH = os.path.join(CREDENTIALS_DIR, "google_oauth_client.json")
 TOKEN_PATH = os.path.join(CREDENTIALS_DIR, "google_token.json")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events.readonly"]
+
+
+def _local_zoneinfo() -> ZoneInfo | None:
+    """Resolve the system IANA timezone via the /etc/localtime symlink.
+
+    Returns a ZoneInfo (DST-aware) or None if the symlink can't be parsed
+    — callers should fall back to ``datetime.astimezone()`` with no arg,
+    which uses the same underlying tz database via libc.
+    """
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return None
+    marker = "zoneinfo/"
+    idx = target.find(marker)
+    if idx < 0:
+        return None
+    try:
+        return ZoneInfo(target[idx + len(marker):])
+    except Exception:  # noqa: BLE001 — ZoneInfoNotFoundError + others
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -153,11 +175,23 @@ def lookup_meeting(
     window_start = naive_start - buffer
     window_end = naive_start + timedelta(minutes=duration_minutes) + buffer
 
-    # Use UTC — Calendar API requires RFC 3339 with timezone
-    # Assume local system timezone for conversion
-    local_tz = datetime.now(timezone.utc).astimezone().tzinfo
-    time_min = window_start.replace(tzinfo=local_tz).isoformat()
-    time_max = window_end.replace(tzinfo=local_tz).isoformat()
+    # Promote naive local times to aware datetimes for the Calendar API.
+    #
+    # Previous version stamped a fixed UTC-offset tzinfo (read from "now"
+    # via astimezone().tzinfo) onto a recording timestamp from a different
+    # date. That ignored DST: a recording from before a DST transition,
+    # enriched after it, would be off by an hour and miss its event.
+    # ZoneInfo carries the full DST history for the zone, so .replace(...)
+    # produces a moment-correct aware datetime.
+    local_tz = _local_zoneinfo()
+    if local_tz is not None:
+        aware_start = window_start.replace(tzinfo=local_tz)
+        aware_end = window_end.replace(tzinfo=local_tz)
+    else:
+        aware_start = window_start.astimezone()
+        aware_end = window_end.astimezone()
+    time_min = aware_start.isoformat()
+    time_max = aware_end.isoformat()
 
     logger.info(
         "Querying Google Calendar for events between %s and %s",
