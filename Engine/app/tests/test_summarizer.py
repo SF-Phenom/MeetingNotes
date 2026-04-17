@@ -125,6 +125,90 @@ class TestValidateApiKey:
         assert "not validated" in msg.lower()
 
 
+class TestClaudeRetryScope:
+    """The Claude retry loop must skip retries on permanent 4xx errors.
+
+    Retries on a BadRequestError (e.g. credit balance exhausted, bad
+    key) burn 2+4 s of backoff before failing identically. The handler
+    should raise RuntimeError on first hit so automatic-mode fallback
+    to Ollama kicks in immediately.
+    """
+
+    def _make_anthropic_error(self, cls, message: str):
+        """Construct SDK errors bypassing their fiddly __init__ signatures."""
+        err = cls.__new__(cls)
+        BaseException.__init__(err, message)
+        return err
+
+    def _patch_claude_client(self, monkeypatch, side_effect):
+        calls = {"count": 0}
+
+        class _StubMessages:
+            def create(self_inner, *args, **kwargs):
+                calls["count"] += 1
+                raise side_effect
+
+        class _StubClient:
+            def __init__(self_inner, *args, **kwargs):
+                self_inner.messages = _StubMessages()
+
+        monkeypatch.setattr(anthropic, "Anthropic", _StubClient)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        return calls
+
+    def _forbid_sleep(self, monkeypatch):
+        """Fail the test if time.sleep is called — proves no retry backoff."""
+        slept = {"count": 0}
+
+        def _no_sleep(_secs):
+            slept["count"] += 1
+
+        monkeypatch.setattr(summarizer.time, "sleep", _no_sleep)
+        return slept
+
+    def test_bad_request_does_not_retry(self, monkeypatch):
+        err = self._make_anthropic_error(
+            anthropic.BadRequestError, "credit balance too low"
+        )
+        calls = self._patch_claude_client(monkeypatch, err)
+        slept = self._forbid_sleep(monkeypatch)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            summarizer._summarize_claude("transcript", "context", {})
+
+        assert "rejected request" in str(excinfo.value)
+        assert "credit balance too low" in str(excinfo.value)
+        assert calls["count"] == 1, "BadRequestError must not trigger retries"
+        assert slept["count"] == 0, "No backoff should occur on permanent errors"
+
+    def test_authentication_error_does_not_retry(self, monkeypatch):
+        err = self._make_anthropic_error(
+            anthropic.AuthenticationError, "invalid x-api-key"
+        )
+        calls = self._patch_claude_client(monkeypatch, err)
+        self._forbid_sleep(monkeypatch)
+
+        with pytest.raises(RuntimeError):
+            summarizer._summarize_claude("transcript", "context", {})
+
+        assert calls["count"] == 1
+
+    def test_rate_limit_error_still_retries(self, monkeypatch):
+        # 429s are transient — keep the existing retry behavior intact.
+        err = self._make_anthropic_error(
+            anthropic.RateLimitError, "rate limit exceeded"
+        )
+        calls = self._patch_claude_client(monkeypatch, err)
+        self._forbid_sleep(monkeypatch)  # allowed to sleep, we just want it fast
+
+        with pytest.raises(RuntimeError) as excinfo:
+            summarizer._summarize_claude("transcript", "context", {})
+
+        # 1 initial + MAX_RETRIES retries = 3 total attempts.
+        assert calls["count"] == 1 + summarizer.MAX_RETRIES
+        assert "after" in str(excinfo.value).lower()
+
+
 class TestSummarizeFallback:
     """Automatic mode must mark the SummaryResult so the UI can surface
     the Claude→Ollama degradation."""

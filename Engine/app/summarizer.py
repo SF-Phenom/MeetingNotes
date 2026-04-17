@@ -262,14 +262,28 @@ def _summarize_claude(
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.error("Failed to parse Claude response as JSON: %s", e)
             last_error = e
+        except (
+            anthropic.BadRequestError,
+            anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError,
+            anthropic.NotFoundError,
+            anthropic.UnprocessableEntityError,
+        ) as e:
+            # Permanent 4xx failures — bad input, invalid key, revoked key,
+            # exhausted credit balance, wrong model. Retrying burns 2+4 s of
+            # backoff before failing identically. In automatic mode the
+            # outer summarize() catches this and falls through to Ollama
+            # immediately; in "claude" mode this surfaces a clear error
+            # instead of a delayed one.
+            logger.error("Claude rejected request (non-retryable): %s", e)
+            raise RuntimeError(f"Claude API rejected request: {e}") from e
         except anthropic.APIError as e:
-            # Covers APIConnectionError, APIStatusError, RateLimitError,
-            # InternalServerError, etc. — the anthropic SDK's top-level base
-            # for everything that could reasonably be retried. Programming
-            # errors (TypeError, AttributeError) are intentionally NOT caught
-            # so they surface loudly in logs instead of being silently retried
-            # three times and then wrapped in a generic "Claude failed"
-            # RuntimeError.
+            # Transient: RateLimitError (429), InternalServerError (5xx),
+            # APIConnectionError, APITimeoutError, ConflictError. Worth
+            # retrying. Programming errors (TypeError, AttributeError) are
+            # intentionally NOT caught so they surface loudly in logs
+            # instead of being silently retried three times and then
+            # wrapped in a generic "Claude failed" RuntimeError.
             last_error = e
         except (TimeoutError, ConnectionError, OSError) as e:
             # Network layer below the SDK.
