@@ -356,8 +356,14 @@ class RealtimeTranscriber:
             pcm_data = None  # noqa: F841
 
     def _write_live_transcript(self, text: str) -> None:
-        """Update the .live.txt file with the current transcript."""
-        if not self._live_txt_path:
+        """Update the .live.txt file with the current transcript.
+
+        Skips the write if ``_stop_event`` is set — a transcription cycle
+        in flight when stop() fires will resume writing after stop()
+        deletes the sidecar, orphaning the file in ``active/``. Bailing
+        here closes that race.
+        """
+        if not self._live_txt_path or self._stop_event.is_set():
             return
         try:
             with open(self._live_txt_path, "w", encoding="utf-8") as f:
