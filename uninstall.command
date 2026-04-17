@@ -6,7 +6,11 @@ set -uo pipefail
 # Double-click this file in Finder, or run: ./uninstall.command
 # ============================================================
 
-BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes_RT}"
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
+# Fall back to the legacy path if a user uninstalls without having migrated.
+if [ -z "${MEETINGNOTES_HOME:-}" ] && [ ! -d "$BASE_DIR" ] && [ -d "$HOME/MeetingNotes_RT" ]; then
+    BASE_DIR="$HOME/MeetingNotes_RT"
+fi
 
 # -- Colors ---------------------------------------------------
 RED='\033[0;31m'

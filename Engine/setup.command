@@ -8,7 +8,22 @@ set -euo pipefail
 # ============================================================
 
 # -- Constants ------------------------------------------------
-BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes_RT}"
+# One-time migration: legacy install was at ~/MeetingNotes_RT
+if [ -z "${MEETINGNOTES_HOME:-}" ] \
+   && [ -d "$HOME/MeetingNotes_RT" ] \
+   && [ ! -e "$HOME/MeetingNotes" ]; then
+    echo "Migrating install: ~/MeetingNotes_RT -> ~/MeetingNotes"
+    mv "$HOME/MeetingNotes_RT" "$HOME/MeetingNotes"
+    if [ -d "$HOME/MeetingNotes/.git" ]; then
+        (cd "$HOME/MeetingNotes" \
+            && git fetch origin --prune 2>/dev/null \
+            && git branch -m MeetingNotes_RT main 2>/dev/null \
+            && git branch -u origin/main main 2>/dev/null \
+            && git remote set-head origin -a 2>/dev/null) || true
+    fi
+fi
+
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
 ENGINE_DIR="$BASE_DIR/Engine"
 CAPTURE_BINARY="$ENGINE_DIR/.bin/capture-audio"
 VENV_DIR="$ENGINE_DIR/.venv"

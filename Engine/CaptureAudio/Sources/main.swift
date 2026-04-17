@@ -52,8 +52,10 @@ let outputPath = args[3]
 
 // MARK: - Paths
 
-let lockDir = (NSHomeDirectory() as NSString)
-    .appendingPathComponent("MeetingNotes_RT/Engine/recordings/active")
+let meetingNotesHome = ProcessInfo.processInfo.environment["MEETINGNOTES_HOME"]
+    ?? (NSHomeDirectory() as NSString).appendingPathComponent("MeetingNotes")
+let lockDir = (meetingNotesHome as NSString)
+    .appendingPathComponent("Engine/recordings/active")
 let lockPath = (lockDir as NSString).appendingPathComponent(".lock")
 
 // MARK: - WAV Writer (single mixed output)

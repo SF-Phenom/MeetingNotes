@@ -2,7 +2,7 @@
 # Double-click this file in Finder to launch MeetingNotes.
 # The menubar app runs in the background — Terminal will close automatically.
 
-BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes_RT}"
+BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
 cd "$BASE_DIR" || {
     osascript -e 'display dialog "MeetingNotes folder not found at '"$BASE_DIR"'" buttons {"OK"} with icon stop' &>/dev/null
     exit 1

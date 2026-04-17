@@ -31,7 +31,7 @@ import sys
 # Keep the package path setup identical to menubar.py so `from app import ...`
 # works when the worker is launched directly (via `python <path>`).
 _BASE_DIR = os.environ.get(
-    "MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes_RT")
+    "MEETINGNOTES_HOME", os.path.expanduser("~/MeetingNotes")
 )
 _ENGINE_DIR = os.path.join(_BASE_DIR, "Engine")
 if _ENGINE_DIR not in sys.path:

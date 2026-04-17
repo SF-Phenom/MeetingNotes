@@ -4,7 +4,7 @@ Originally these constants were spread across state.py, menubar.py, and a
 few others. Centralizing them here makes the install layout a one-file
 change later (e.g. when sharing with coworkers and the install path
 might be ``/Applications/MeetingNotes.app/Contents/Resources`` instead of
-``~/MeetingNotes_RT``).
+``~/MeetingNotes``).
 
 Bootstrap caveat: ``menubar.py`` and ``call_detector_worker.py`` each
 duplicate the ``HOME_DIR`` derivation in their first few lines because
@@ -21,7 +21,7 @@ import os
 
 HOME_DIR = os.environ.get(
     "MEETINGNOTES_HOME",
-    os.path.expanduser("~/MeetingNotes_RT"),
+    os.path.expanduser("~/MeetingNotes"),
 )
 
 ENGINE_DIR = os.path.join(HOME_DIR, "Engine")
