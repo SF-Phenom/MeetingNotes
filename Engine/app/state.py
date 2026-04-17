@@ -57,6 +57,12 @@ class State:
     # User-selected transcription backend. "parakeet" (default) or
     # "apple_speech". Read by transcription_engine.get_*_engine factories.
     transcription_engine: str = "parakeet"
+    # Action-item exporter — "disabled" (default) or "apple_reminders".
+    # Read by exporter.export_action_items at the end of the pipeline.
+    exporter_backend: str = "disabled"
+    # Reminders list name when exporter_backend == "apple_reminders".
+    # Created on first export if it doesn't exist.
+    apple_reminders_list: str = "MeetingNotes"
 
     @classmethod
     def from_raw(cls, raw: dict) -> "State":
@@ -87,6 +93,8 @@ DEFAULT_STATE = {
     "active_call_url": None,
     "active_call_source": None,
     "transcription_engine": "parakeet",
+    "exporter_backend": "disabled",
+    "apple_reminders_list": "MeetingNotes",
 }
 
 
