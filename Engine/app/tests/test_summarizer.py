@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.summarizer import _extract_json
+import anthropic
+
+from app import summarizer
+from app.summarizer import _extract_json, validate_api_key
 
 
 class TestExtractJson:
@@ -68,3 +71,55 @@ class TestExtractJson:
             "Trailing {junk}."
         )
         assert _extract_json(text) == {"real": "content"}
+
+
+class TestValidateApiKey:
+    """Round-trip validation against the Anthropic API.
+
+    The actual SDK is real but we patch ``Anthropic.models.list`` so each
+    test deterministically raises (or succeeds) without a network call.
+    """
+
+    @pytest.fixture
+    def patch_models_list(self, monkeypatch):
+        """Replace anthropic.Anthropic so models.list does what we want."""
+
+        def _factory(side_effect):
+            class _StubModels:
+                def list(self_inner):
+                    if isinstance(side_effect, BaseException):
+                        raise side_effect
+                    return side_effect
+
+            class _StubClient:
+                def __init__(self_inner, *args, **kwargs):
+                    self_inner.models = _StubModels()
+
+            monkeypatch.setattr(anthropic, "Anthropic", _StubClient)
+
+        return _factory
+
+    def test_success(self, patch_models_list):
+        patch_models_list(["model-a"])  # any non-exception value
+        ok, msg = validate_api_key("sk-ant-good")
+        assert ok is True
+        assert "validated" in msg.lower()
+
+    def test_authentication_error_rejected(self, patch_models_list):
+        # AuthenticationError signature requires message + response + body in
+        # current SDK; constructing one directly is fiddly, so use a generic
+        # APIError subclass with the right name via a minimal raise path.
+        err = anthropic.AuthenticationError.__new__(anthropic.AuthenticationError)
+        BaseException.__init__(err, "401 invalid x-api-key")
+        patch_models_list(err)
+        ok, msg = validate_api_key("sk-ant-bad")
+        assert ok is False
+        assert "rejected" in msg.lower()
+
+    def test_network_error_treated_as_soft_ok(self, patch_models_list):
+        err = anthropic.APIConnectionError.__new__(anthropic.APIConnectionError)
+        BaseException.__init__(err, "connection refused")
+        patch_models_list(err)
+        ok, msg = validate_api_key("sk-ant-offline")
+        assert ok is True
+        assert "not validated" in msg.lower()

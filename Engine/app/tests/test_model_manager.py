@@ -76,9 +76,17 @@ class TestApiKeyPresent:
 class TestSaveApiKey:
     @pytest.fixture
     def home(self, tmp_path, monkeypatch):
-        """Point ~/.zshrc at a temp file via HOME override."""
+        """Point ~/.zshrc at a temp file via HOME override.
+
+        Also stubs out summarizer.validate_api_key so save_api_key tests
+        stay hermetic — the live API round-trip is exercised separately
+        via direct stubbing in dedicated tests.
+        """
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr(
+            summarizer, "validate_api_key", lambda _key: (True, "stubbed")
+        )
         return tmp_path
 
     def test_empty_key_rejected(self, home):
@@ -98,6 +106,18 @@ class TestSaveApiKey:
         assert os.environ.get("ANTHROPIC_API_KEY") is None
         mm.ModelManager().save_api_key("nope")
         assert os.environ.get("ANTHROPIC_API_KEY") is None
+
+    def test_round_trip_failure_blocks_save(self, home, monkeypatch):
+        monkeypatch.setattr(
+            summarizer, "validate_api_key",
+            lambda _key: (False, "Anthropic rejected the key"),
+        )
+        key = "sk-ant-fake-" + "x" * 20
+        ok, msg = mm.ModelManager().save_api_key(key)
+        assert ok is False
+        assert "rejected" in msg.lower()
+        assert os.environ.get("ANTHROPIC_API_KEY") is None
+        assert not (home / ".zshrc").exists()
 
     def test_valid_key_writes_zshrc_and_env(self, home):
         key = "sk-ant-test-" + "x" * 20

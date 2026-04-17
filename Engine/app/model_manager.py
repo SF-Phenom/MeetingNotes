@@ -61,12 +61,21 @@ class ModelManager:
         writes the key to ``~/.zshrc`` with an atomic rewrite so a mid-write
         crash can't wipe the user's shell config. On validation failure,
         returns ``(False, reason)`` without touching anything.
+
+        Validation is two-stage: a cheap shape check, then a live
+        round-trip against the Anthropic API. Catching a typo or revoked
+        key here means the user finds out at save time instead of at
+        their next meeting transcription.
         """
         key = (raw_key or "").strip()
         if not key:
             return False, "No key provided."
         if not key.startswith("sk-ant-"):
             return False, "The key should start with 'sk-ant-'."
+
+        ok, validation_msg = summarizer.validate_api_key(key)
+        if not ok:
+            return False, validation_msg
 
         os.environ["ANTHROPIC_API_KEY"] = key
 

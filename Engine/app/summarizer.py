@@ -67,6 +67,41 @@ def get_model_preference() -> str:
     return _model_preference
 
 
+# --- Anthropic key validation ------------------------------------------------
+
+def validate_api_key(api_key: str) -> tuple[bool, str]:
+    """Round-trip an Anthropic API key against the public API.
+
+    Returns ``(ok, message)``. ``ok=True`` means the key is either
+    confirmed valid OR the network was unreachable so we couldn't tell
+    (in which case the message says so — the caller may still want to
+    save). ``ok=False`` means the API itself rejected the key.
+
+    Issues a cheap ``models.list()`` call — no token usage, just an
+    auth check.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        return False, "anthropic package not installed."
+
+    client = anthropic.Anthropic(api_key=api_key, timeout=10.0)
+    try:
+        client.models.list()
+        return True, "Key validated against Anthropic API."
+    except anthropic.AuthenticationError as e:
+        return False, f"Anthropic rejected the key: {e}"
+    except anthropic.PermissionDeniedError as e:
+        return False, f"Key has insufficient permissions: {e}"
+    except (anthropic.APIConnectionError, TimeoutError, OSError) as e:
+        # Network unreachable — we can't validate. Treat as soft-OK so an
+        # offline laptop can still save a key; first transcription will
+        # discover any problem.
+        return True, f"Network unreachable; key shape OK but not validated: {e}"
+    except anthropic.APIError as e:
+        return False, f"Anthropic API error: {e}"
+
+
 # --- Ollama discovery --------------------------------------------------------
 
 def discover_ollama_models() -> list[str]:
