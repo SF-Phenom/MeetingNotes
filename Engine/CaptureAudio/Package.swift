@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "CaptureAudio",
     platforms: [
-        .macOS(.v14)
+        .macOS("14.2")
     ],
     targets: [
         .executableTarget(
@@ -13,6 +13,10 @@ let package = Package(
             swiftSettings: [
                 .unsafeFlags(["-strict-concurrency=complete"])
             ]
+        ),
+        .executableTarget(
+            name: "TapSpike",
+            path: "SpikeSources"
         )
     ]
 )
