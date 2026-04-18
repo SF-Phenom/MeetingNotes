@@ -25,6 +25,35 @@ HOME_DIR = os.environ.get(
 )
 
 ENGINE_DIR = os.path.join(HOME_DIR, "Engine")
+
+
+# --- Local dev overrides -----------------------------------------------------
+#
+# Engine/.env.local is gitignored and loaded on import so developer-only
+# env vars (e.g. MEETINGNOTES_RETAIN_RECORDINGS=1) can persist across
+# launches without baking them into the repo or the shell profile.
+# Format: one KEY=VALUE per line, '#' starts a comment, quotes stripped.
+# Existing os.environ values win — nothing here overrides an explicit export.
+
+def _load_env_local() -> None:
+    path = os.path.join(ENGINE_DIR, ".env.local")
+    try:
+        with open(path, "r") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_local()
 BIN_DIR = os.path.join(ENGINE_DIR, ".bin")
 QUEUE_DIR = os.path.join(ENGINE_DIR, "recordings", "queue")
 ACTIVE_DIR = os.path.join(ENGINE_DIR, "recordings", "active")

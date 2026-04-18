@@ -35,7 +35,6 @@ class TestStateFromRaw:
         assert s.active_recording_path == "/tmp/foo.wav"
         assert s.transcripts_since_checkin == 7
         # Unset fields fall back to defaults:
-        assert s.retain_recordings is False
         assert s.suppressed_sources == []
 
     def test_unknown_fields_silently_ignored(self):

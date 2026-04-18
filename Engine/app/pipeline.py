@@ -364,7 +364,11 @@ def process_recording(
     try:
         current_state = state_mod.load()
         count = current_state.get("transcripts_since_checkin", 0) + 1
-        retain = current_state.get("retain_recordings", False)
+        # Developer escape hatch — default is delete-after-transcribe so a
+        # non-technical coworker can't stumble into the recordings folder.
+        # Set MEETINGNOTES_RETAIN_RECORDINGS=1 in Engine/.env.local (gitignored)
+        # to keep WAVs for debugging / regression testing.
+        retain = os.environ.get("MEETINGNOTES_RETAIN_RECORDINGS") == "1"
         recording = RecordingFile(wav_path)
 
         state_updates: dict = {"transcripts_since_checkin": count}
@@ -378,7 +382,7 @@ def process_recording(
 
         state_mod.update(**state_updates)
         logger.info(
-            "State updated: transcripts_since_checkin=%d, retain_recordings=%s",
+            "State updated: transcripts_since_checkin=%d, retain=%s",
             count,
             retain,
         )

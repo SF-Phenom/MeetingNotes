@@ -373,8 +373,7 @@ else
   "recording_active": false,
   "active_recording_path": null,
   "active_call_url": null,
-  "active_call_source": null,
-  "retain_recordings": false
+  "active_call_source": null
 }
 EOF
     success "state.json created"

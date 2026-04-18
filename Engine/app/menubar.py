@@ -228,15 +228,6 @@ class MeetingNotesApp(rumps.App):
         # Action-item exporter submenu (Disabled vs Apple Reminders)
         items.append(self._build_exporter_submenu())
 
-        # Retain recordings toggle
-        retain_item = rumps.MenuItem(
-            "Retain Recordings",
-            callback=self._toggle_retain_recordings,
-        )
-        retain_item.state = (
-            1 if state_mod.load().get("retain_recordings", False) else 0
-        )
-        items.append(retain_item)
         items.append(None)
 
         # API key status
@@ -730,14 +721,6 @@ class MeetingNotesApp(rumps.App):
             subtitle=subtitle,
             message=message,
         )
-
-    # ── Retain recordings toggle ────────────────────────────────────────────────
-
-    def _toggle_retain_recordings(self, _sender) -> None:
-        """Toggle whether recordings are kept after transcription."""
-        current = state_mod.load().get("retain_recordings", False)
-        state_mod.update(retain_recordings=not current)
-        self._build_idle_menu()
 
     # ── API Key ────────────────────────────────────────────────────────────────
 

@@ -33,6 +33,9 @@ Engine/.credentials/
 /.claude/
 .env
 
+# Local developer env overrides (loaded by environment.py)
+Engine/.env.local
+
 # Legacy root-level artifacts (safe to remove after migration)
 /.bin/
 /.venv/

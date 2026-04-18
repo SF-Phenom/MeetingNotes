@@ -42,7 +42,6 @@ class State:
     last_checkin_date: str | None = None
     suppressed_sources: list[str] = field(default_factory=list)
     pending_deletion: list[dict] = field(default_factory=list)
-    retain_recordings: bool = False
     recording_active: bool = False
     active_recording_path: str | None = None
     active_call_url: str | None = None
@@ -80,7 +79,6 @@ DEFAULT_STATE = {
     "last_checkin_date": None,
     "suppressed_sources": [],
     "pending_deletion": [],
-    "retain_recordings": False,
     "recording_active": False,
     "active_recording_path": None,
     "active_call_url": None,
