@@ -96,6 +96,68 @@ def _load_context_md() -> str:
         return ""
 
 
+def _resolve_base_title(metadata: dict, summary, source: str) -> str:
+    """Pick the working title for a transcript, preferring calendar over LLM.
+
+    Priority:
+      1. Calendar event title (via metadata['title'], populated when enrichment
+         associated an event — see calendar_lookup.lookup_meeting's strict
+         association rule).
+      2. LLM-derived summary title.
+      3. Source-based fallback ("Zoom Meeting", "Manual Meeting", etc.).
+    """
+    cal_title = metadata.get("title")
+    if cal_title:
+        return cal_title
+    if summary is not None and summary.title:
+        return summary.title
+    return f"{source.title()} Meeting"
+
+
+def _find_prior_parts(
+    event_id: str,
+    date_str: str,
+    transcripts_root: str,
+) -> list[str]:
+    """Return paths of transcripts already on disk for the same calendar event
+    on the same day. Used to number subsequent recordings "(part 2)", "(part 3)".
+
+    Scan scope: transcripts/YYYY/MM/ with filenames prefixed by date_str. We
+    read only the frontmatter (first ~2KB) to look for a matching
+    ``calendar_event_id:`` line — cheap, and the field is always near the top.
+    Empty event_id short-circuits to an empty list.
+    """
+    if not event_id:
+        return []
+    try:
+        year, month, _ = date_str.split("-")
+    except ValueError:
+        return []
+
+    day_dir = os.path.join(transcripts_root, year, month)
+    if not os.path.isdir(day_dir):
+        return []
+
+    needle = f"calendar_event_id: {event_id}"
+    prior: list[str] = []
+    try:
+        entries = os.listdir(day_dir)
+    except OSError:
+        return []
+    for filename in entries:
+        if not filename.startswith(f"{date_str}_") or not filename.endswith(".md"):
+            continue
+        path = os.path.join(day_dir, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                head = f.read(2048)
+        except OSError:
+            continue
+        if needle in head:
+            prior.append(path)
+    return prior
+
+
 def _write_transcript(content: str, date_str: str, title: str) -> str:
     """
     Write markdown content to transcripts/YYYY/MM/{date}_{slug}.md.
@@ -303,9 +365,20 @@ def process_recording(
         )
 
     # Step 7: Format the markdown content
-    title = (summary.title if summary else None) or metadata.get(
-        "title", f"{source.title()} Meeting"
-    )
+    #
+    # Title priority: calendar event title > LLM summary title > source
+    # fallback. If an earlier transcript on disk already claims this same
+    # calendar event for today, tag this one "(part N)" so both titles
+    # stay human-readable instead of colliding into an HHMMSS suffix.
+    base_title = _resolve_base_title(metadata, summary, source)
+    event_id = metadata.get("calendar_event_id", "")
+    prior_parts = _find_prior_parts(event_id, date_str, TRANSCRIPTS_DIR)
+    if prior_parts:
+        title = f"{base_title} (part {len(prior_parts) + 1})"
+    else:
+        title = base_title
+    # Formatter reads metadata["title"] as the authoritative display title.
+    metadata["title"] = title
 
     # format_transcript is pure string-building; ValueError is the realistic
     # failure mode (bad date/time parse, unicode issue in a field).

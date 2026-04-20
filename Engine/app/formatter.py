@@ -90,11 +90,13 @@ def format_transcript(
     duration_min = getattr(transcription, "duration_minutes", 0)
     wav_basename = metadata.get("wav_filename", "")
 
-    # Determine title
-    if summary:
-        title = summary.title or "Untitled Meeting"
-    else:
-        title = metadata.get("title", f"{source_display} Meeting")
+    # Title priority: metadata['title'] is authoritative (pipeline pre-
+    # resolves the calendar > LLM > source-fallback order and any Part N
+    # suffix before calling us). Formatter-local fallbacks exist only so
+    # direct callers (tests, ad-hoc tooling) still get a sensible default.
+    title = metadata.get("title")
+    if not title:
+        title = (summary.title if summary else None) or f"{source_display} Meeting"
 
     # Frontmatter participants — prefer metadata, fall back to unknown
     participants_display = metadata.get("participants", "unknown")
@@ -110,6 +112,12 @@ def format_transcript(
     lines.append(f"participants: {participants_display}")
     if wav_basename:
         lines.append(f"recording: {wav_basename}")
+    # Calendar event ID — enables the Part N collision detector in
+    # pipeline._find_prior_parts to stitch repeat recordings of the same
+    # meeting together without relying on fragile filename matching.
+    event_id = metadata.get("calendar_event_id")
+    if event_id:
+        lines.append(f"calendar_event_id: {event_id}")
     lines.append(f"transcribed: {today}")
     model_used = getattr(summary, "model_used", "") if summary else ""
     if model_used:

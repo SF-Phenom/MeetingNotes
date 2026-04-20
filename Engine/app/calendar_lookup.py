@@ -183,22 +183,74 @@ def _save_token(creds) -> None:
 # Calendar lookup
 # ---------------------------------------------------------------------------
 
-def lookup_meeting(
-    date_str: str,
-    time_str: str,
-    duration_minutes: int = 60,
-) -> dict | None:
+# Pre-event association buffer. A recording started up to this many minutes
+# before an event's scheduled start is still associated with that event —
+# gives the user leeway to arm the recorder early.
+ASSOC_PRE_BUFFER = timedelta(minutes=10)
+
+
+def _parse_event_time(event: dict, key: str) -> datetime | None:
+    """Parse an event's start/end dateTime as a naive local datetime.
+
+    All-day events (which use 'date' not 'dateTime') return None — we
+    deliberately skip those for association because blocks like "PTO" or
+    "Focus Time" shouldn't title a recording.
     """
-    Find a Google Calendar event matching the recording's time window.
+    raw = event.get(key, {}).get("dateTime")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _select_event(events: list[dict], recording_start: datetime) -> dict | None:
+    """Apply the association rule + tiebreaker to a list of candidate events.
+
+    Rule: recording_start must satisfy
+        event.start - 10 min  <=  recording_start  <=  event.end
+
+    Tiebreaker (back-to-back meetings): prefer events whose start is
+    >= recording_start (upcoming). Among those, pick the earliest start —
+    that's the meeting the user is about to have, not the one just ending.
+    If every qualifying event has already started, fall back to the one
+    whose start is closest to recording_start.
+    """
+    candidates: list[tuple[dict, datetime, datetime]] = []
+    for event in events:
+        event_start = _parse_event_time(event, "start")
+        event_end = _parse_event_time(event, "end")
+        if event_start is None or event_end is None:
+            continue
+        if event_start - ASSOC_PRE_BUFFER <= recording_start <= event_end:
+            candidates.append((event, event_start, event_end))
+
+    if not candidates:
+        return None
+
+    upcoming = [c for c in candidates if c[1] >= recording_start]
+    if upcoming:
+        chosen = min(upcoming, key=lambda c: c[1])
+    else:
+        chosen = min(candidates, key=lambda c: abs(c[1] - recording_start))
+    return chosen[0]
+
+
+def lookup_meeting(date_str: str, time_str: str) -> dict | None:
+    """
+    Find a Google Calendar event associated with the recording's start time.
+
+    Association rule: the event is associated iff
+        event.start - 10 min  <=  recording_start  <=  event.end
 
     Args:
         date_str: Recording date as "YYYY-MM-DD".
         time_str: Recording start time as "HH-MM".
-        duration_minutes: Approximate meeting length (default 60).
 
     Returns:
-        {"title": str, "participants": list[str], "description": str | None}
-        or None if no matching event is found.
+        {"title": str, "participants": list[str], "description": str | None,
+         "event_id": str} or None if no associated event is found.
     """
     try:
         from googleapiclient.discovery import build
@@ -220,10 +272,18 @@ def lookup_meeting(
         logger.warning("Could not parse date/time '%s %s': %s", date_str, time_str, e)
         return None
 
-    # Build search window (±5 min buffer around start; extend to end of meeting)
-    buffer = timedelta(minutes=5)
-    window_start = naive_start - buffer
-    window_end = naive_start + timedelta(minutes=duration_minutes) + buffer
+    # Build Google-API query window. We need to fetch any event that *could*
+    # satisfy the association rule so _select_event can apply it precisely.
+    # Google's events.list filter returns events where
+    #     event.end > timeMin  AND  event.start < timeMax
+    # so:
+    #   timeMin = recording_start - 1 min  → catches events still in progress
+    #             and ones ending at the recording moment.
+    #   timeMax = recording_start + 11 min → catches events starting up to
+    #             10 min after (the pre-buffer), plus 1 min of slack.
+    # Client-side, _select_event enforces the strict rule.
+    query_start = naive_start - timedelta(minutes=1)
+    query_end = naive_start + timedelta(minutes=11)
 
     # Promote naive local times to aware datetimes for the Calendar API.
     #
@@ -235,11 +295,11 @@ def lookup_meeting(
     # produces a moment-correct aware datetime.
     local_tz = _local_zoneinfo()
     if local_tz is not None:
-        aware_start = window_start.replace(tzinfo=local_tz)
-        aware_end = window_end.replace(tzinfo=local_tz)
+        aware_start = query_start.replace(tzinfo=local_tz)
+        aware_end = query_end.replace(tzinfo=local_tz)
     else:
-        aware_start = window_start.astimezone()
-        aware_end = window_end.astimezone()
+        aware_start = query_start.astimezone()
+        aware_end = query_end.astimezone()
     time_min = aware_start.isoformat()
     time_max = aware_end.isoformat()
 
@@ -280,39 +340,19 @@ def lookup_meeting(
 
     events = result.get("items", [])
     if not events:
-        logger.info("No calendar events found in the search window.")
+        logger.info("No calendar events found in the association window.")
         return None
 
-    logger.info("Found %d candidate event(s) in search window.", len(events))
+    logger.info("Fetched %d candidate event(s); applying association rule.", len(events))
 
-    # Pick the event whose start time is closest to the recording start
-    naive_target = naive_start
-    best_event = None
-    best_delta = timedelta(days=999)
-
-    for event in events:
-        start_raw = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
-        if not start_raw:
-            continue
-        try:
-            # dateTime includes timezone offset; date is all-day
-            if "T" in start_raw:
-                event_start = datetime.fromisoformat(start_raw).replace(tzinfo=None)
-            else:
-                event_start = datetime.strptime(start_raw, "%Y-%m-%d")
-            delta = abs(event_start - naive_target)
-            if delta < best_delta:
-                best_delta = delta
-                best_event = event
-        except ValueError:
-            continue
-
+    best_event = _select_event(events, naive_start)
     if best_event is None:
+        logger.info("No event satisfies the association rule — returning no match.")
         return None
 
     # Extract fields — log titles only at debug level (privacy)
     title: str = best_event.get("summary", "Untitled Meeting")
-    logger.debug("Best matching event title: %r (delta=%s)", title, best_delta)
+    logger.debug("Associated event title: %r", title)
 
     # Build participant list
     raw_attendees = best_event.get("attendees", [])
@@ -342,6 +382,7 @@ def lookup_meeting(
         "title": title,
         "participants": participants,
         "description": description,
+        "event_id": best_event.get("id", ""),
     }
 
 
@@ -384,6 +425,8 @@ def enrich_metadata(wav_path: str) -> dict:
 
     if cal_match:
         result["title"] = cal_match["title"]
+        if cal_match.get("event_id"):
+            result["calendar_event_id"] = cal_match["event_id"]
         if cal_match.get("participants"):
             result["participants"] = ", ".join(cal_match["participants"])
         if cal_match.get("description"):
