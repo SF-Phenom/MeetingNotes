@@ -157,30 +157,22 @@ Ollama runs in the background. The app auto-detects it when Claude is unavailabl
 
 ## 9. Google Calendar Integration (Optional)
 
-Auto-populates meeting name and participants from your Google Calendar. If you skip this, the pipeline still works — you just won't get calendar metadata.
+Auto-populates the transcript title and participants from your Google Calendar. If you skip this, the pipeline still works — you just won't get calendar metadata.
 
-**Prerequisites:** A Google Cloud project with the Calendar API enabled and an OAuth 2.0 "Desktop app" credential.
+**The app ships with a shared OAuth client** (a Desktop-app credential from the MeetingNotes Google Cloud project). `setup.command` copies it to `Engine/.credentials/google_oauth_client.json` automatically on first install. You sign in with your own Google account; your personal refresh token lives only in `Engine/.credentials/google_token.json` and never leaves your Mac.
 
-**Place the credential file:**
+**Signing in:** `setup.command` asks once during install. You can also trigger it any time from the menubar → **Calendar ✓ → Re-authenticate** (or **Sign in to Google Calendar** if you haven't signed in yet).
 
-```bash
-mkdir -p ~/MeetingNotes/Engine/.credentials
-cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes/Engine/.credentials/google_oauth_client.json
-```
+**Advanced: using your own OAuth client.** If you'd rather point at your own Google Cloud project:
 
-**Authenticate** (one-time — opens a browser window):
+1. Create an OAuth 2.0 "Desktop app" credential in Google Cloud Console with the Calendar API enabled.
+2. Replace the file:
+   ```bash
+   cp /path/to/your/client_secret_XXXXX.json ~/MeetingNotes/Engine/.credentials/google_oauth_client.json
+   ```
+3. From the menubar → **Calendar ✓ → Re-authenticate** to pick up the new client.
 
-```bash
-cd ~/MeetingNotes/Engine
-source .venv/bin/activate
-python3 -c "
-from app.calendar_lookup import _get_credentials
-creds = _get_credentials()
-print('SUCCESS' if creds else 'FAILED')
-"
-```
-
-The token is saved to `Engine/.credentials/google_token.json` and auto-refreshes.
+`Engine/.credentials/` is gitignored, so your replacement stays local.
 
 ---
 

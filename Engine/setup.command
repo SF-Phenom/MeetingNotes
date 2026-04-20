@@ -496,6 +496,20 @@ fi
 # ============================================================
 step 12 "Google Calendar integration (optional)"
 
+# Seed the OAuth client JSON from the repo-tracked default if the user
+# doesn't already have one. Shipping a shared installed-app OAuth client
+# is supported by Google (the client_secret for Desktop apps is not
+# treated as a secret). See Engine/defaults/README.md for why this is
+# safe. Users who want their own Google Cloud project can replace the
+# copied file — .credentials/ stays gitignored.
+mkdir -p "$ENGINE_DIR/.credentials"
+if [[ ! -f "$ENGINE_DIR/.credentials/google_oauth_client.json" ]] \
+   && [[ -f "$ENGINE_DIR/defaults/google_oauth_client.json" ]]; then
+    cp "$ENGINE_DIR/defaults/google_oauth_client.json" \
+       "$ENGINE_DIR/.credentials/google_oauth_client.json"
+    info "Seeded default OAuth client from Engine/defaults/."
+fi
+
 if [[ -f "$ENGINE_DIR/.credentials/google_token.json" ]]; then
     # Probe the saved token rather than trust file existence. Validity
     # can fail two ways that matter: refresh token expired/revoked, or
