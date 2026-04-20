@@ -4,17 +4,42 @@
 
 ## Quick Start (Recommended)
 
-Double-click `Engine/setup.command` in Finder, or run it from Terminal:
+Open **Terminal** (Applications → Utilities → Terminal) and paste this one-liner:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SF-Phenom/MeetingNotes/main/install.sh | zsh
+```
+
+It downloads the setup script, runs it, and takes 5–15 minutes on a fresh machine
+(mostly the ~2.5 GB Parakeet model download). The install is idempotent — safe
+to re-run if anything goes sideways.
+
+You'll be prompted for a few things along the way: your macOS password (for Homebrew),
+and your Anthropic API key if you have one (optional — the app falls back to a local
+model when Claude isn't available).
+
+### Already have the repo cloned?
+
+If you got the source via `git clone` rather than a file transfer, you can skip the
+bootstrap and run the setup script directly:
 
 ```bash
 cd ~/MeetingNotes
 ./Engine/setup.command
 ```
 
-The script is idempotent (safe to re-run) and will skip anything already installed.
-It takes 5–15 minutes on a fresh machine, mostly due to the Parakeet model download (~2.5 GB).
+Or double-click `Engine/setup.command` in Finder.
 
-If you prefer to install manually, or if the script hits an issue, follow the step-by-step guide below.
+### Why a curl installer?
+
+When `setup.command` travels as a file (email, Slack, AirDrop, direct download),
+macOS strips its executable bit and flags it with a Gatekeeper quarantine —
+double-clicking fails, "Run Anyway" doesn't fully rescue it. The `curl | zsh`
+route sidesteps both issues by pulling the script fresh from GitHub and running
+it without ever touching Finder. **This is the path most users should take.**
+
+If you prefer to install manually, or if the script hits an issue, follow the
+step-by-step guide below.
 
 ---
 
