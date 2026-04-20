@@ -184,10 +184,10 @@ class TestParakeetBatchAdapter:
         test doesn't actually spin up MLX."""
         from app import transcriber as transcriber_mod
 
-        seen: list[tuple[str, dict | None]] = []
+        seen: list[str] = []
 
-        def fake_transcribe(path, *, hints=None):
-            seen.append((path, hints))
+        def fake_transcribe(path):
+            seen.append(path)
             return transcriber_mod.TranscriptionResult(
                 plain_text="hello", timestamped_text="[00:00] hello",
                 duration_minutes=1, srt_path="",
@@ -198,25 +198,5 @@ class TestParakeetBatchAdapter:
         )
 
         result = ParakeetBatchEngine().transcribe("/tmp/foo.wav")
-        assert seen == [("/tmp/foo.wav", None)]
+        assert seen == ["/tmp/foo.wav"]
         assert result.plain_text == "hello"
-
-    def test_transcribe_forwards_hints(self, monkeypatch):
-        from app import transcriber as transcriber_mod
-
-        seen: list[dict | None] = []
-
-        def fake_transcribe(path, *, hints=None):
-            seen.append(hints)
-            return transcriber_mod.TranscriptionResult(
-                plain_text="x", timestamped_text="x", duration_minutes=0, srt_path="",
-            )
-
-        monkeypatch.setattr(
-            transcriber_mod, "transcribe_with_parakeet", fake_transcribe,
-        )
-
-        ParakeetBatchEngine().transcribe(
-            "/tmp/foo.wav", hints={"participant_count": 3},
-        )
-        assert seen == [{"participant_count": 3}]

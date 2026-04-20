@@ -143,9 +143,7 @@ def _transcribe_chunk(model, wav_chunk_path: str, decoding) -> object:
     return result
 
 
-def transcribe_with_parakeet(
-    wav_path: str, *, hints: dict | None = None,
-) -> TranscriptionResult:
+def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     """
     Transcribe a .wav file using parakeet-mlx.
 
@@ -154,9 +152,6 @@ def transcribe_with_parakeet(
 
     Args:
         wav_path: Absolute path to the .wav file.
-        hints: Optional pipeline-layer context. Currently read:
-            ``participant_count: int`` — drives diarizer model routing
-            (see :func:`_pick_diarizer_model`). Unknown keys are ignored.
 
     Returns:
         TranscriptionResult with plain text, timestamped text, and duration.
@@ -309,15 +304,6 @@ def transcribe_with_parakeet(
             )
         )
 
-    # Optional diarization: if the user opted in AND a backend is available,
-    # assign Speaker A / Speaker B / … labels to each sentence by max time
-    # overlap with the diarizer's segments. Any failure here is logged and
-    # swallowed — we'd rather ship a transcript without speaker labels than
-    # lose one over a diarization bug.
-    filtered_sentences = _diarize_if_enabled(
-        wav_path, filtered_sentences, hints=hints,
-    )
-
     timestamped_text = build_timestamped_paragraphs(filtered_sentences)
     plain_text = build_plain_paragraphs(filtered_sentences)
 
@@ -381,82 +367,3 @@ def _speech_end(sent, time_offset: float) -> float:
             return tok.end + time_offset
     # Degenerate case: whole sentence is punctuation. Fall back to sent.end.
     return sent.end + time_offset
-
-
-# Env var override for the diarization_enabled state flag. Accepts the
-# usual truthy strings ("1", "true", "yes", "on") case-insensitively;
-# anything else (including unset) defers to state.json. Lets developers
-# exercise the diarization path without having to edit state.json by hand.
-DIARIZATION_ENABLED_ENV_VAR = "MEETINGNOTES_DIARIZATION"
-
-
-def _diarization_enabled() -> bool:
-    """Resolve the diarization flag: env var override > state.json > default."""
-    env = os.environ.get(DIARIZATION_ENABLED_ENV_VAR, "").strip().lower()
-    if env in ("1", "true", "yes", "on"):
-        return True
-    if env in ("0", "false", "no", "off"):
-        return False
-    try:
-        from app.state import State
-        return State.load().diarization_enabled
-    except Exception as e:  # noqa: BLE001 — diarization must never break transcription
-        logger.warning("Could not read diarization flag from state (%s); treating as off.", e)
-        return False
-
-
-# Threshold above which we fall back from Sortformer to community-1.
-# Sortformer caps out at 4 speakers; community-1 has no cap. The count
-# we're comparing against is *total* meeting headcount (user included),
-# which is what ``_build_engine_hints`` populates.
-_SORTFORMER_MAX_PARTICIPANTS = 4
-
-
-def _pick_diarizer_model(hints: dict | None) -> str:
-    """Choose between FluidAudio's community-1 and sortformer backends.
-
-    Small meetings (≤4 total attendees per the calendar) get Sortformer's
-    better DER; anything bigger or unknown stays on community-1, which
-    handles any number of speakers. ``FluidAudioDiarizer`` treats unknown
-    model strings as community-1, so this never returns an invalid value
-    for the wrapper.
-    """
-    if hints:
-        count = hints.get("participant_count")
-        if isinstance(count, int) and count > 0 and count <= _SORTFORMER_MAX_PARTICIPANTS:
-            return "sortformer"
-    return "community-1"
-
-
-def _diarize_if_enabled(wav_path: str, sentences, *, hints: dict | None = None):
-    """Assign speaker labels in-place when diarization is enabled and available.
-
-    Returns the input list unchanged when diarization is off, when no
-    backend is registered, or when the backend fails. Never raises —
-    speaker labels are a nice-to-have and must not break transcription.
-    """
-    if not _diarization_enabled():
-        return sentences
-    try:
-        from app.diarizer import get_diarizer
-        diarizer = get_diarizer()
-        if diarizer is None:
-            logger.info("Diarization enabled but no backend registered; skipping.")
-            return sentences
-        model = _pick_diarizer_model(hints)
-        logger.info("Running diarizer (model=%s) on %s", model, os.path.basename(wav_path))
-        segments = diarizer.diarize(wav_path, model=model)
-        if not segments:
-            logger.info("Diarizer returned no segments for %s.", os.path.basename(wav_path))
-            return sentences
-        from app.speaker_alignment import assign_speakers
-        labelled = assign_speakers(sentences, segments)
-        n_labelled = sum(1 for s in labelled if s.speaker is not None)
-        logger.info(
-            "Diarization assigned speakers to %d/%d sentences (%d segments).",
-            n_labelled, len(labelled), len(segments),
-        )
-        return labelled
-    except Exception as e:  # noqa: BLE001 — diarization failure is non-fatal
-        logger.warning("Diarization failed (non-fatal), continuing without speakers: %s", e)
-        return sentences

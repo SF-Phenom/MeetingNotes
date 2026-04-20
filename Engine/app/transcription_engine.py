@@ -44,16 +44,8 @@ SUPPORTED_ENGINES = ("parakeet", "apple_speech")
 class BatchEngine(Protocol):
     """Offline, all-at-once transcription of a WAV file on disk."""
 
-    def transcribe(
-        self, wav_path: str, *, hints: dict | None = None,
-    ) -> TranscriptionResult:
+    def transcribe(self, wav_path: str) -> TranscriptionResult:
         """Return the TranscriptionResult for ``wav_path``.
-
-        ``hints`` is an optional dict of pipeline-layer context the engine
-        may consult but is always free to ignore. Currently the Parakeet
-        engine reads ``hints["participant_count"]`` to route diarization
-        between FluidAudio's community-1 and Sortformer models. Unknown
-        keys are silently ignored.
 
         Should raise ``RuntimeError`` on any engine-specific failure so the
         pipeline can record the transcript as "Transcription unavailable"
@@ -95,13 +87,11 @@ class RealtimeEngine(Protocol):
 class ParakeetBatchEngine:
     """Adapter — wraps the module-level transcribe_with_parakeet function."""
 
-    def transcribe(
-        self, wav_path: str, *, hints: dict | None = None,
-    ) -> TranscriptionResult:
+    def transcribe(self, wav_path: str) -> TranscriptionResult:
         # Late import so the heavy parakeet-mlx module is only loaded when
         # we're actually about to transcribe — saves app-startup time.
         from app.transcriber import transcribe_with_parakeet
-        return transcribe_with_parakeet(wav_path, hints=hints)
+        return transcribe_with_parakeet(wav_path)
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +107,7 @@ class AppleSpeechBatchEngine:
     isn't generated).
     """
 
-    def transcribe(
-        self, wav_path: str, *, hints: dict | None = None,
-    ) -> TranscriptionResult:
-        # Apple Speech has no diarization path and no other hint consumers,
-        # so ``hints`` is intentionally ignored.
-        del hints
+    def transcribe(self, wav_path: str) -> TranscriptionResult:
         from app.speech_transcriber import transcribe_file
         text = transcribe_file(wav_path)
         if not text:
