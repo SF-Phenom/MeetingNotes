@@ -24,7 +24,12 @@ CREDENTIALS_DIR = os.path.join(BASE_DIR, "Engine", ".credentials")
 CLIENT_SECRET_PATH = os.path.join(CREDENTIALS_DIR, "google_oauth_client.json")
 TOKEN_PATH = os.path.join(CREDENTIALS_DIR, "google_token.json")
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# Historical scope used by pre-Tweak-B tokens. When we detect a token with
+# only the narrower scope, _get_credentials refuses to use it — forces re-auth
+# so the wider scope (needed for primary calendar metadata → user email →
+# attendee filter) gets granted.
+_LEGACY_SCOPES = ["https://www.googleapis.com/auth/calendar.events.readonly"]
 
 
 def _local_zoneinfo() -> ZoneInfo | None:
@@ -87,6 +92,13 @@ def _get_credentials(*, interactive: bool = False):
             creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
         except Exception as e:  # noqa: BLE001 — all failures mean re-auth
             logger.warning("Could not load saved token (%s); will re-authenticate.", e)
+            creds = None
+
+        # Detect a token granted under the legacy narrow scope. Those tokens
+        # still authenticate but can't hit calendars.get(primary), so the
+        # attendee-filter path silently degrades. Force re-auth.
+        if creds is not None and not _scopes_satisfy(creds):
+            logger.info("Saved token lacks current scope set; re-auth required.")
             creds = None
 
     if creds and creds.valid:
@@ -177,6 +189,118 @@ def _save_token(creds) -> None:
             f.write(creds.to_json())
     except OSError as e:
         logger.warning("Could not save token to %s: %s", TOKEN_PATH, e)
+
+
+def _scopes_satisfy(creds) -> bool:
+    """Return True if the granted credentials cover every scope we require.
+
+    google-auth stores granted scopes on ``creds.scopes`` (list or None).
+    We require every scope in SCOPES to be present; extras are fine.
+    """
+    granted = set(getattr(creds, "scopes", None) or [])
+    return all(scope in granted for scope in SCOPES)
+
+
+def reset_auth() -> bool:
+    """Delete the saved Google token so the next authorize_interactive() call
+    forces a fresh consent flow. Returns True if a token was removed, False
+    if there was nothing to remove.
+    """
+    if not os.path.exists(TOKEN_PATH):
+        return False
+    try:
+        os.remove(TOKEN_PATH)
+        logger.info("Google Calendar token cleared; re-auth required.")
+        return True
+    except OSError as e:
+        logger.warning("Could not remove token at %s: %s", TOKEN_PATH, e)
+        return False
+
+
+def test_connection() -> dict:
+    """Probe the current Google Calendar auth + scope + event-fetch path.
+
+    Used by the menubar "Test Calendar Connection" action and the
+    setup.command validity probe. Returns a dict describing what worked —
+    caller formats it for display.
+
+    Keys:
+        status: one of "ok", "not_authorized", "scope_outdated", "error"
+        detail: short human-readable summary
+        email: str | None — primary calendar ID (== user email) when scope allows
+        upcoming_count: int — number of events fetched in the probe window
+    """
+    result: dict = {
+        "status": "error",
+        "detail": "",
+        "email": None,
+        "upcoming_count": 0,
+    }
+
+    if not os.path.exists(TOKEN_PATH):
+        result["status"] = "not_authorized"
+        result["detail"] = "No saved Google Calendar token. Sign in from the menubar."
+        return result
+
+    try:
+        from googleapiclient.discovery import build
+    except ImportError:
+        result["detail"] = (
+            "google-api-python-client not installed. Run setup.command to restore the venv."
+        )
+        return result
+
+    creds = _get_credentials()
+    if creds is None:
+        # _get_credentials returns None for both missing and scope-outdated
+        # tokens. Distinguish so the UI can say the right thing.
+        try:
+            from google.oauth2.credentials import Credentials
+            raw = Credentials.from_authorized_user_file(TOKEN_PATH, _LEGACY_SCOPES)
+        except Exception:  # noqa: BLE001 — any failure = token is dead
+            raw = None
+        if raw is not None and not _scopes_satisfy(raw):
+            result["status"] = "scope_outdated"
+            result["detail"] = (
+                "Saved token is missing the calendar.readonly scope. "
+                "Choose Re-authenticate to upgrade."
+            )
+        else:
+            result["status"] = "not_authorized"
+            result["detail"] = (
+                "Token is invalid or expired beyond refresh. Sign in again."
+            )
+        return result
+
+    try:
+        service = build("calendar", "v3", credentials=creds)
+        cal_info = service.calendars().get(calendarId="primary").execute()
+        result["email"] = cal_info.get("id")
+
+        # Look a few hours ahead for upcoming events — confirms events.list
+        # works end-to-end, not just the metadata call.
+        now = datetime.utcnow()
+        time_min = now.isoformat() + "Z"
+        time_max = (now + timedelta(hours=24)).isoformat() + "Z"
+        events = service.events().list(
+            calendarId="primary",
+            timeMin=time_min,
+            timeMax=time_max,
+            maxResults=10,
+            singleEvents=True,
+            orderBy="startTime",
+        ).execute()
+        result["upcoming_count"] = len(events.get("items", []))
+        result["status"] = "ok"
+        result["detail"] = (
+            f"Connected as {result['email']}. "
+            f"{result['upcoming_count']} event(s) in the next 24 hours."
+        )
+    except Exception as e:  # noqa: BLE001 — any Google API failure is a probe failure
+        result["status"] = "error"
+        result["detail"] = f"Google Calendar probe failed: {e}"
+
+    return result
 
 
 # ---------------------------------------------------------------------------

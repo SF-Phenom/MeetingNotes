@@ -242,7 +242,20 @@ class MeetingNotesApp(rumps.App):
         # the user's browser, so it's gated behind this explicit click —
         # never triggered automatically from the transcription path.
         if calendar_lookup.is_authorized():
-            items.append(rumps.MenuItem("Calendar \u2713"))
+            # Connected — expose Test + Re-authenticate under a submenu so
+            # the checkmark isn't a dead end. Test probes auth + scope +
+            # events.list in one call; Re-auth forces a fresh consent flow
+            # (needed after scope changes like the calendar.readonly widen).
+            cal_menu = rumps.MenuItem("Calendar \u2713")
+            cal_menu.add(rumps.MenuItem(
+                "Test Connection",
+                callback=self._test_calendar_connection,
+            ))
+            cal_menu.add(rumps.MenuItem(
+                "Re-authenticate",
+                callback=self._reauth_calendar,
+            ))
+            items.append(cal_menu)
         else:
             items.append(
                 rumps.MenuItem(
@@ -782,6 +795,45 @@ class MeetingNotesApp(rumps.App):
         else:
             rumps.alert(title="Calendar sign-in failed", message=message)
         self._build_idle_menu()
+
+    def _test_calendar_connection(self, _sender) -> None:
+        """Run the calendar probe on a background thread and show the result.
+
+        The probe hits two Google endpoints (calendars.get, events.list),
+        which adds network latency to every click. Running on a worker
+        keeps the menubar responsive while the roundtrip completes.
+        """
+        import threading
+
+        def _worker() -> None:
+            probe = calendar_lookup.test_connection()
+            self._ui_bridge.dispatch(lambda: self._on_calendar_test_result(probe))
+
+        threading.Thread(target=_worker, name="calendar-test", daemon=True).start()
+
+    def _on_calendar_test_result(self, probe: dict) -> None:
+        status = probe.get("status", "error")
+        detail = probe.get("detail", "Unknown error.")
+        if status == "ok":
+            rumps.alert(title="Calendar connected", message=detail)
+        elif status == "scope_outdated":
+            # Offer a one-click path to the fix rather than making the user
+            # dig through the menu again after reading the message.
+            rumps.alert(title="Scope upgrade required", message=detail)
+            self._reauth_calendar(None)
+        else:
+            rumps.alert(title="Calendar test failed", message=detail)
+
+    def _reauth_calendar(self, _sender) -> None:
+        """Delete the saved token and kick off a fresh OAuth flow.
+
+        Used both for planned scope upgrades (e.g. the Tweak B calendar.readonly
+        widen) and ad-hoc "something's off, start over" moments. The delete is
+        synchronous; the flow itself runs via _authorize_calendar's existing
+        background-thread path so the menubar stays responsive.
+        """
+        calendar_lookup.reset_auth()
+        self._authorize_calendar(None)
 
     # ── Permissions ────────────────────────────────────────────────────────────
 

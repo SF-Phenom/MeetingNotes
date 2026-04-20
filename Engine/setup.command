@@ -497,7 +497,41 @@ fi
 step 12 "Google Calendar integration (optional)"
 
 if [[ -f "$ENGINE_DIR/.credentials/google_token.json" ]]; then
-    already "Google Calendar authenticated"
+    # Probe the saved token rather than trust file existence. Validity
+    # can fail two ways that matter: refresh token expired/revoked, or
+    # the token was minted under an older, narrower scope. The second
+    # case won't fix itself — forces re-auth to grant the new scope set.
+    cd "$ENGINE_DIR"
+    probe_output=$("$VENV_DIR/bin/python" -c "
+import sys; sys.path.insert(0, '.')
+from app.calendar_lookup import test_connection
+probe = test_connection()
+print(probe.get('status', 'error'))
+" 2>/dev/null) || probe_output="error"
+
+    case "$probe_output" in
+        ok)
+            already "Google Calendar authenticated"
+            ;;
+        scope_outdated)
+            warn "Google Calendar token is missing the calendar.readonly scope."
+            if confirm "Re-authenticate to upgrade the scope?"; then
+                "$VENV_DIR/bin/python" -c "
+import sys; sys.path.insert(0, '.')
+from app.calendar_lookup import reset_auth, authorize_interactive
+reset_auth()
+ok, _msg = authorize_interactive()
+print('SUCCESS' if ok else 'FAILED')
+" && success "Google Calendar re-authenticated" || warn "Re-authentication failed. Retry via the menubar → Calendar → Re-authenticate."
+            else
+                warn "Leaving stale token in place. Meeting-name enrichment will keep degrading silently."
+            fi
+            ;;
+        *)
+            warn "Google Calendar token exists but failed to validate (status: $probe_output)."
+            info "Open the menubar → Calendar → Test Connection for details, or re-run setup.command."
+            ;;
+    esac
 elif [[ ! -f "$ENGINE_DIR/.credentials/google_oauth_client.json" ]]; then
     warn "OAuth client JSON not found at Engine/.credentials/google_oauth_client.json"
     info "Skipped. See Engine/SETUP.md section 7b for details."
@@ -508,7 +542,7 @@ else
         "$VENV_DIR/bin/python" -c "
 import sys; sys.path.insert(0, '.')
 from app.calendar_lookup import _get_credentials
-creds = _get_credentials()
+creds = _get_credentials(interactive=True)
 print('SUCCESS' if creds else 'FAILED')
 " && success "Google Calendar authenticated" || warn "Authentication failed. You can retry later by re-running setup.command."
     else
