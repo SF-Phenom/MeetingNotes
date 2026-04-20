@@ -195,6 +195,15 @@ class SpeechRealtimeTranscriber:
         """True while the transcriber is running."""
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def accumulated_sentences(self) -> list:
+        """Apple Speech doesn't produce per-sentence timestamps, so speaker
+        diarization isn't wired for this engine. Satisfies the
+        :class:`RealtimeEngine` protocol by returning an empty list —
+        pipeline-level diarization treats that as "skip diarization."
+        """
+        return []
+
     def start(self, wav_path: str) -> None:
         """Begin transcribing the growing WAV file."""
         if self._thread and self._thread.is_alive():

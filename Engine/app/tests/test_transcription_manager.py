@@ -12,7 +12,8 @@ import time
 import pytest
 
 from app import transcription_manager as tm_mod
-from app.transcription_manager import TranscriptionManager
+from app.transcription_manager import RealtimeResult, TranscriptionManager
+from app.transcript_formatter import Sentence
 from app.ui_bridge import UIBridge
 
 
@@ -24,6 +25,7 @@ class _FakeRealtime:
         self.stopped = False
         self.live_transcript_path: str | None = None
         self._stop_return = "realtime text"
+        self._sentences: list[Sentence] = []
         self.raise_on_start = False
         self.raise_on_stop = False
 
@@ -38,6 +40,10 @@ class _FakeRealtime:
         if self.raise_on_stop:
             raise RuntimeError("boom-stop")
         return self._stop_return
+
+    @property
+    def accumulated_sentences(self) -> list[Sentence]:
+        return self._sentences
 
 
 @pytest.fixture
@@ -108,14 +114,31 @@ class TestRealtime:
         _, rebuild = rebuild_log
         m = TranscriptionManager(UIBridge(), rebuild, notify)
         m.start_realtime("/tmp/x.wav")
-        assert m.stop_realtime() == "realtime text"
+        result = m.stop_realtime()
+        assert result.text == "realtime text"
+        assert result.sentences == []
         assert fake_realtime_cls[0].stopped is True
 
-    def test_stop_without_start_returns_none(self, notify_log, rebuild_log):
+    def test_stop_returns_accumulated_sentences(self, fake_realtime_cls, notify_log, rebuild_log):
         _, notify = notify_log
         _, rebuild = rebuild_log
         m = TranscriptionManager(UIBridge(), rebuild, notify)
-        assert m.stop_realtime() is None
+        m.start_realtime("/tmp/x.wav")
+        # Prime the fake with sentences the engine would have produced.
+        fake_realtime_cls[0]._sentences = [
+            Sentence(start=0.0, end=1.0, text="hi"),
+            Sentence(start=1.5, end=2.0, text="hello"),
+        ]
+        result = m.stop_realtime()
+        assert len(result.sentences) == 2
+        assert [s.text for s in result.sentences] == ["hi", "hello"]
+
+    def test_stop_without_start_returns_empty_result(self, notify_log, rebuild_log):
+        _, notify = notify_log
+        _, rebuild = rebuild_log
+        m = TranscriptionManager(UIBridge(), rebuild, notify)
+        result = m.stop_realtime()
+        assert result == RealtimeResult(text=None, sentences=[])
 
     def test_stop_swallows_exception(self, fake_realtime_cls, notify_log, rebuild_log):
         _, notify = notify_log
@@ -123,7 +146,9 @@ class TestRealtime:
         m = TranscriptionManager(UIBridge(), rebuild, notify)
         m.start_realtime("/tmp/x.wav")
         fake_realtime_cls[0].raise_on_stop = True
-        assert m.stop_realtime() is None
+        result = m.stop_realtime()
+        assert result.text is None
+        assert result.sentences == []
         # Manager resets _realtime to None afterward so next start is clean.
         assert m.realtime_live_transcript_path is None
 
@@ -512,3 +537,32 @@ class TestBatchSignals:
             ("/tmp/b.wav", None),
             ("/tmp/c.wav", None),
         ]
+
+    def test_pre_transcribed_sentences_only_used_on_first(
+        self, monkeypatch, notify_log, rebuild_log,
+    ):
+        _, notify = notify_log
+        _, rebuild = rebuild_log
+        seen: list[tuple[str, list | None]] = []
+
+        def _pipeline(wav_path, pre_transcribed_text=None,
+                      pre_transcribed_sentences=None, **_kwargs):
+            seen.append((wav_path, pre_transcribed_sentences))
+            return "/tmp/out.md"
+
+        monkeypatch.setattr(tm_mod.pipeline, "process_recording", _pipeline)
+        monkeypatch.setattr(tm_mod.checkin, "should_trigger_checkin", lambda: False)
+
+        sents = [Sentence(start=0.0, end=1.0, text="hi")]
+        m = TranscriptionManager(UIBridge(), rebuild, notify)
+        m.submit(
+            ["/tmp/a.wav", "/tmp/b.wav"],
+            pre_transcribed_text="HI",
+            pre_transcribed_sentences=sents,
+        )
+        _wait_until(lambda: not m.is_transcribing)
+
+        # Only first recording gets the sentences — subsequent wavs never
+        # saw the realtime engine.
+        assert seen[0] == ("/tmp/a.wav", sents)
+        assert seen[1] == ("/tmp/b.wav", None)

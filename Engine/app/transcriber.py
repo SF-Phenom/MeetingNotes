@@ -25,6 +25,12 @@ class TranscriptionResult:
     timestamped_text: str     # Text with [HH:MM:SS] prefixes
     duration_minutes: int     # Meeting duration in minutes (rounded)
     srt_path: str             # Path to the .srt file (kept for reference)
+    # Timed sentences behind ``plain_text``/``timestamped_text`` when the
+    # engine produced them. Populated by Parakeet (batch and realtime),
+    # left None by engines without timing data (Apple Speech). The pipeline
+    # consults this for post-transcription diarization alignment; when it's
+    # None or empty, diarization is silently skipped for the recording.
+    sentences: list | None = None
 
 
 # --- Parakeet engine ---------------------------------------------------------
@@ -319,6 +325,7 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
         timestamped_text=timestamped_text,
         duration_minutes=duration_minutes,
         srt_path="",  # Parakeet doesn't produce SRT files
+        sentences=filtered_sentences,
     )
 
 

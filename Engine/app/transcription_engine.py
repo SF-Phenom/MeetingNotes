@@ -78,6 +78,17 @@ class RealtimeEngine(Protocol):
         """Path to a .live.txt file that updates during recording, or None."""
         ...
 
+    @property
+    def accumulated_sentences(self) -> list:
+        """All :class:`Sentence` records this session produced so far.
+
+        Populated by engines that carry per-sentence timings (Parakeet);
+        engines without timing data (Apple Speech) return ``[]``. The
+        pipeline consults this after :meth:`stop` to decide whether
+        diarization can run — empty means skip.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Parakeet adapters

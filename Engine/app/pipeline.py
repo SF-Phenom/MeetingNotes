@@ -96,6 +96,140 @@ def _load_context_md() -> str:
         return ""
 
 
+# --- Diarization -------------------------------------------------------------
+#
+# Runs after transcription produces the TranscriptionResult, regardless of
+# whether sentences came from realtime (fast path) or the batch engine
+# (realtime unavailable or Apple Speech). We align speaker segments to
+# sentences, then re-render ``plain_text`` and ``timestamped_text`` so the
+# written .md carries ``**Speaker A:**`` prefixes at paragraph boundaries.
+#
+# Critically, this does NOT re-read the WAV for transcription. Diarization
+# itself reads the WAV once (inside the FluidAudio subprocess) but that's
+# it — the retention posture of "realtime streams chunks and discards" is
+# preserved: no second full-file transcription pass is ever introduced by
+# enabling diarization.
+
+
+# Env var override for the diarization_enabled state flag. Accepts the
+# usual truthy strings ("1", "true", "yes", "on") case-insensitively;
+# anything else (including unset) defers to state.json.
+DIARIZATION_ENABLED_ENV_VAR = "MEETINGNOTES_DIARIZATION"
+
+# Sortformer caps out at 4 speakers; community-1 has no cap. The threshold
+# is total headcount (user + other attendees). Unknown count or >4 routes
+# to community-1; known count <= 4 routes to sortformer for its better DER.
+_SORTFORMER_MAX_PARTICIPANTS = 4
+
+
+def _diarization_enabled() -> bool:
+    """Resolve the diarization flag: env var override > state.json > default."""
+    env = os.environ.get(DIARIZATION_ENABLED_ENV_VAR, "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    try:
+        from app.state import State
+        return State.load().diarization_enabled
+    except Exception as e:  # noqa: BLE001 — diarization must never break transcription
+        logger.warning(
+            "Could not read diarization flag from state (%s); treating as off.", e,
+        )
+        return False
+
+
+def _pick_diarizer_model(metadata: dict) -> str:
+    """Pick between FluidAudio's community-1 and sortformer backends.
+
+    Small meetings (≤4 total attendees per the calendar) get Sortformer's
+    better DER; anything larger or unknown stays on community-1, which
+    handles any number of speakers. ``metadata["participants"]`` is a
+    ", "-joined display-name string of OTHER attendees — the user is
+    filtered out upstream by ``calendar_lookup``, so we add 1 to the
+    count to get total headcount.
+    """
+    participants = metadata.get("participants")
+    if isinstance(participants, str) and participants.strip():
+        n_others = len([p for p in participants.split(",") if p.strip()])
+        total = n_others + 1  # +1 for the user
+        if 0 < total <= _SORTFORMER_MAX_PARTICIPANTS:
+            return "sortformer"
+    return "community-1"
+
+
+def _maybe_diarize(wav_path, transcription, metadata):
+    """Run speaker diarization on ``transcription.sentences`` when enabled.
+
+    Returns a new ``TranscriptionResult`` with speakered text, or the
+    input unchanged when diarization is off / no backend is registered /
+    no sentences are available / the diarizer failed. Never raises —
+    speaker labels are a nice-to-have and must not break transcription.
+    """
+    if not _diarization_enabled():
+        return transcription
+
+    sentences = transcription.sentences
+    if not sentences:
+        # Apple Speech path (no timings) or a too-short recording. Quietly
+        # skip — diarization isn't applicable.
+        logger.debug(
+            "Diarization enabled but no sentences available for %s; skipping.",
+            os.path.basename(wav_path),
+        )
+        return transcription
+
+    try:
+        from app.diarizer import get_diarizer
+        diarizer = get_diarizer()
+        if diarizer is None:
+            logger.info(
+                "Diarization enabled but no backend registered; skipping.",
+            )
+            return transcription
+
+        model = _pick_diarizer_model(metadata)
+        logger.info(
+            "Running diarizer (model=%s) on %s",
+            model, os.path.basename(wav_path),
+        )
+        segments = diarizer.diarize(wav_path, model=model)
+        if not segments:
+            logger.info(
+                "Diarizer returned no segments for %s.",
+                os.path.basename(wav_path),
+            )
+            return transcription
+
+        from app.speaker_alignment import assign_speakers
+        from app.transcript_formatter import (
+            build_plain_paragraphs,
+            build_timestamped_paragraphs,
+        )
+        labelled = assign_speakers(sentences, segments)
+        n_labelled = sum(1 for s in labelled if s.speaker is not None)
+        logger.info(
+            "Diarization assigned speakers to %d/%d sentences (%d segments).",
+            n_labelled, len(labelled), len(segments),
+        )
+
+        # Rebuild text from the speakered sentences so the .md transcript
+        # picks up **Speaker X:** prefixes on paragraph boundaries.
+        from app.transcriber import TranscriptionResult
+        return TranscriptionResult(
+            plain_text=build_plain_paragraphs(labelled),
+            timestamped_text=build_timestamped_paragraphs(labelled),
+            duration_minutes=transcription.duration_minutes,
+            srt_path=transcription.srt_path,
+            sentences=labelled,
+        )
+    except Exception as e:  # noqa: BLE001 — diarization failure is non-fatal
+        logger.warning(
+            "Diarization failed (non-fatal), continuing without speakers: %s", e,
+        )
+        return transcription
+
+
 def _resolve_base_title(metadata: dict, summary, source: str) -> str:
     """Pick the working title for a transcript, preferring calendar over LLM.
 
@@ -215,6 +349,7 @@ def process_recording(
     wav_path: str,
     pre_transcribed_text: str | None = None,
     *,
+    pre_transcribed_sentences: list | None = None,
     on_summary_fallback: Callable[[], None] | None = None,
     on_export: Callable[[ExportResult], None] | None = None,
     on_too_short: Callable[[], None] | None = None,
@@ -226,6 +361,12 @@ def process_recording(
         wav_path: Path to a .wav file in recordings/queue/.
         pre_transcribed_text: If provided (from realtime transcription), skip
             the transcription step and use this text directly.
+        pre_transcribed_sentences: Optional list of :class:`Sentence`
+            records carried over from the realtime engine. When present
+            (Parakeet realtime only; Apple Speech can't produce timings),
+            the pipeline can run speaker diarization on them without
+            re-reading the WAV. Safe to pass ``None`` or ``[]`` — the
+            pipeline simply skips the diarization step.
         on_summary_fallback: Optional zero-arg callback fired when the
             summarizer was in automatic mode and fell back from Claude to
             Ollama. Used by the menubar to surface the degradation —
@@ -315,6 +456,9 @@ def process_recording(
             timestamped_text=pre_transcribed_text,
             duration_minutes=0,
             srt_path="",
+            # Carry realtime-produced sentences through so the diarization
+            # step can align speaker labels without a second WAV read.
+            sentences=pre_transcribed_sentences or None,
         )
     else:
         try:
@@ -329,6 +473,14 @@ def process_recording(
         except (RuntimeError, OSError, FileNotFoundError) as e:
             logger.error("Transcription failed: %s", e)
             return None
+
+    # Step 4b: Optional speaker diarization. Runs on whichever sentence
+    # list is available (realtime's accumulated or batch engine's output),
+    # re-renders plain_text and timestamped_text with **Speaker A:**
+    # prefixes on paragraph boundaries. No-op when diarization is off,
+    # when no backend is registered, or when no sentences are available
+    # (Apple Speech path).
+    transcription = _maybe_diarize(wav_path, transcription, metadata)
 
     # Step 5: Load context.md for Claude
     context_md = _load_context_md()

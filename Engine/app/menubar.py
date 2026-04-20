@@ -419,7 +419,7 @@ class MeetingNotesApp(rumps.App):
     def _do_stop_recording(self, notify: bool = False) -> None:
         """Stop recording and update the UI, then auto-transcribe."""
         try:
-            realtime_text = self._transcription.stop_realtime()
+            realtime_result = self._transcription.stop_realtime()
 
             queue_path = recorder.stop_recording()
             self._recording_start = None
@@ -433,7 +433,9 @@ class MeetingNotesApp(rumps.App):
                 )
             if queue_path:
                 self._transcription.submit(
-                    [queue_path], pre_transcribed_text=realtime_text,
+                    [queue_path],
+                    pre_transcribed_text=realtime_result.text,
+                    pre_transcribed_sentences=realtime_result.sentences,
                 )
         except Exception as e:
             logger.error("Failed to stop recording: %s", e, exc_info=True)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from app import pipeline
 from app import checkin
@@ -33,6 +33,21 @@ logger = logging.getLogger(__name__)
 
 RebuildMenuFn = Callable[[], None]
 NotifyFn = Callable[[str, str], None]
+
+
+class RealtimeResult(NamedTuple):
+    """Outcome of stopping a realtime session.
+
+    Carries both the accumulated text (used for the existing "too short"
+    check and for the Apple Speech path, which has no per-sentence
+    timings) and the list of :class:`~app.transcript_formatter.Sentence`
+    records (used by pipeline-level diarization when diarization is
+    enabled). Either field may be empty independently — a short recording
+    yields "", []; Apple Speech yields "some text", [].
+    """
+
+    text: str | None
+    sentences: list
 
 
 class TranscriptionManager:
@@ -71,20 +86,32 @@ class TranscriptionManager:
             self._realtime = None
             return False
 
-    def stop_realtime(self) -> str | None:
-        """Stop live transcription and return the accumulated text, if any."""
+    def stop_realtime(self) -> RealtimeResult:
+        """Stop live transcription and return both the accumulated text
+        AND any per-sentence timings the engine produced.
+
+        Always returns a :class:`RealtimeResult`; missing or erroring
+        engines come back as ``RealtimeResult(None, [])``. Sentences are
+        pulled off the engine *before* the reference is cleared so that
+        callers (menubar → submit()) can pass them to the pipeline for
+        diarization alignment.
+        """
         if self._realtime is None:
-            return None
+            return RealtimeResult(text=None, sentences=[])
         try:
             text = self._realtime.stop()
+            # accumulated_sentences is a RealtimeEngine-protocol member —
+            # Parakeet returns the corrected list; Apple Speech returns [].
+            sentences = list(self._realtime.accumulated_sentences)
             logger.info(
-                "Realtime transcriber stopped, got %d chars",
+                "Realtime transcriber stopped, got %d chars, %d sentences",
                 len(text) if text else 0,
+                len(sentences),
             )
-            return text
+            return RealtimeResult(text=text, sentences=sentences)
         except Exception as e:  # noqa: BLE001
             logger.error("Error stopping realtime transcriber: %s", e)
-            return None
+            return RealtimeResult(text=None, sentences=[])
         finally:
             self._realtime = None
 
@@ -104,8 +131,16 @@ class TranscriptionManager:
         self,
         wav_paths: list[str],
         pre_transcribed_text: str | None = None,
+        pre_transcribed_sentences: list | None = None,
     ) -> bool:
         """Queue a batch of recordings for background transcription.
+
+        ``pre_transcribed_sentences`` (when non-empty) carries the realtime
+        engine's accumulated Sentence list so the pipeline can run
+        diarization on it without re-reading the WAV. Applies only to the
+        first wav in ``wav_paths`` — subsequent files weren't seen by the
+        realtime engine and will take the batch path if Parakeet is
+        selected.
 
         Returns True if the job started, False if another batch is already
         running (caller can ignore or surface a message).
@@ -123,7 +158,7 @@ class TranscriptionManager:
 
         thread = threading.Thread(
             target=self._run_batch,
-            args=(wav_paths, pre_transcribed_text),
+            args=(wav_paths, pre_transcribed_text, pre_transcribed_sentences),
             daemon=True,
         )
         thread.start()
@@ -139,6 +174,7 @@ class TranscriptionManager:
         self,
         wav_paths: list[str],
         pre_transcribed_text: str | None,
+        pre_transcribed_sentences: list | None = None,
     ) -> None:
         succeeded = 0
         failed = 0
@@ -170,11 +206,14 @@ class TranscriptionManager:
                 saw_too_short = False
                 try:
                     logger.info("Transcribing: %s", os.path.basename(wav_path))
-                    # Only the first file gets pre-transcribed text (from realtime).
+                    # Only the first file gets pre-transcribed text + sentences
+                    # from realtime; subsequent files weren't seen by realtime.
                     pre_text = pre_transcribed_text if i == 0 else None
+                    pre_sents = pre_transcribed_sentences if i == 0 else None
                     result = pipeline.process_recording(
                         wav_path,
                         pre_transcribed_text=pre_text,
+                        pre_transcribed_sentences=pre_sents,
                         on_summary_fallback=_mark_fallback,
                         on_export=_record_export,
                         on_too_short=_mark_too_short,

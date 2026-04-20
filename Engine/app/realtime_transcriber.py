@@ -148,26 +148,39 @@ class RealtimeTranscriber:
         )
         return accumulated
 
+    @property
+    def accumulated_sentences(self) -> list:
+        """All Sentences produced this session with corrections applied.
+
+        Safe to call after :meth:`stop`: the model/stream references are
+        released on stop, but the sentence accumulators stay intact so the
+        pipeline-level diarizer can align speaker labels against them
+        without re-reading the WAV. Returns ``[]`` when no audio was long
+        enough to produce any sentences (very short recording).
+        """
+        from app.corrections import apply_corrections
+        from app.transcript_formatter import Sentence
+        out: list[Sentence] = []
+        sources = list(self._chunk_sentences) + [self._current_chunk_sentences]
+        for chunk in sources:
+            for s in chunk:
+                out.append(
+                    Sentence(
+                        start=s.start,
+                        end=s.end,
+                        text=apply_corrections(s.text),
+                        speech_end=s.speech_end,
+                    )
+                )
+        return out
+
     def _full_text(self) -> str:
         """Assemble the session transcript with paragraph breaks on pauses."""
-        from app.corrections import apply_corrections
-        from app.transcript_formatter import Sentence, build_plain_paragraphs
-        all_sents: list[Sentence] = []
-        for chunk in self._chunk_sentences:
-            all_sents.extend(chunk)
-        all_sents.extend(self._current_chunk_sentences)
-        if not all_sents:
+        from app.transcript_formatter import build_plain_paragraphs
+        sents = self.accumulated_sentences
+        if not sents:
             return ""
-        corrected = [
-            Sentence(
-                start=s.start,
-                end=s.end,
-                text=apply_corrections(s.text),
-                speech_end=s.speech_end,
-            )
-            for s in all_sents
-        ]
-        return build_plain_paragraphs(corrected)
+        return build_plain_paragraphs(sents)
 
     def _run(self) -> None:
         """Background loop: poll for new audio, transcribe periodically."""
