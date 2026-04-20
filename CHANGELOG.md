@@ -8,6 +8,42 @@ Pre-1.0 releases may contain breaking changes on any minor-version bump.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-20
+
+Installer reliability pass, driven by a real coworker handoff. No changes
+to the running app — this release is entirely about making a fresh install
+on a new Mac work without hands-on help.
+
+### Added
+- `install.sh` bootstrap at the repo root. Public install command is now
+  a single line:
+  ```
+  curl -fsSL https://raw.githubusercontent.com/SF-Phenom/MeetingNotes/main/install.sh | zsh
+  ```
+  Sidesteps the macOS exec-bit / Gatekeeper-quarantine breakage that hits
+  `setup.command` when it travels as a file (email, Slack, AirDrop). The
+  bootstrap downloads via curl (Terminal-initiated, no quarantine),
+  chmods, and re-execs with `/dev/tty` as stdin so the interactive
+  setup prompts still work when the bootstrap was itself piped from curl.
+- `Engine/defaults/google_oauth_client.json` shipped in the repo so
+  coworkers don't need to provision their own Google Cloud project. It's
+  an installed (Desktop-app) OAuth client, which Google explicitly
+  designs to be embedded in distributed source — per-user refresh tokens
+  still live only on each user's machine in the gitignored
+  `Engine/.credentials/`.
+
+### Changed
+- `setup.command` step 5 (Parakeet model): replaced the silent
+  `&>/dev/null` check with a HuggingFace cache-dir sniff plus a
+  visible-progress download. Fresh installs now see HuggingFace's
+  native tqdm bars during the 2.5 GB download instead of a frozen
+  terminal for several minutes. Cached runs skip Python startup entirely.
+- `setup.command` step 12: seeds the OAuth client from `Engine/defaults/`
+  on fresh installs; the "OAuth client JSON not found" warning is now
+  a true corner case (user deleted the defaults file).
+- `Engine/SETUP.md` Quick Start leads with the curl one-liner. Double-
+  click and `git clone` paths kept as documented alternatives.
+
 ## [0.1.0] — 2026-04-20
 
 First tracked release. The app is feature-complete for single-user meeting
