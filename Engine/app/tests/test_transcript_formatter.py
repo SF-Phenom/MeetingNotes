@@ -172,3 +172,114 @@ class TestBuildTimestampedParagraphs:
         result = build_timestamped_paragraphs(sentences)
         assert "\n\n" not in result
         assert result == "[00:00:00] First.\n[00:00:01] Second."
+
+
+# ---------------------------------------------------------------------------
+# Speaker prefixes (diarization plumbing)
+# ---------------------------------------------------------------------------
+
+
+def _speaker_sent(start: float, end: float, text: str, speaker: str | None) -> Sentence:
+    return Sentence(start=start, end=end, text=text, speaker=speaker)
+
+
+class TestBuildPlainParagraphsWithSpeakers:
+    def test_no_speakers_anywhere_matches_legacy_output(self):
+        # Baseline: when no sentence has a speaker, output is byte-identical
+        # to the pre-diarization behavior. Critical for the Apple Speech
+        # path and for all existing Parakeet recordings.
+        sentences = [
+            _sent(0.0, 1.0, "Opening."),
+            _sent(1.0 + PARAGRAPH_GAP_SECS + 0.1, 3.0, "New paragraph"),
+        ]
+        assert build_plain_paragraphs(sentences) == "Opening.\n\nNew paragraph"
+
+    def test_single_speaker_prefixed_on_first_paragraph(self):
+        sentences = [
+            _speaker_sent(0.0, 1.0, "Hello.", "Speaker A"),
+            _speaker_sent(1.1, 2.0, "how are you", "Speaker A"),
+        ]
+        # Same paragraph (small gap, same speaker) — single prefix at the top.
+        assert build_plain_paragraphs(sentences) == "**Speaker A:** Hello. how are you"
+
+    def test_speaker_change_forces_paragraph_break(self):
+        # Adjacent sentences with different speakers MUST break into separate
+        # paragraphs even when the pause gap is below threshold.
+        sentences = [
+            _speaker_sent(0.0, 1.0, "Hello.", "Speaker A"),
+            _speaker_sent(1.05, 2.0, "Hi there.", "Speaker B"),
+        ]
+        result = build_plain_paragraphs(sentences)
+        assert result == "**Speaker A:** Hello.\n\n**Speaker B:** Hi there."
+
+    def test_speaker_prefix_on_each_paragraph(self):
+        sentences = [
+            _speaker_sent(0.0, 1.0, "First.", "Speaker A"),
+            _speaker_sent(1.0 + PARAGRAPH_GAP_SECS + 0.1, 3.0, "Second.", "Speaker A"),
+            _speaker_sent(3.0 + PARAGRAPH_GAP_SECS + 0.1, 4.0, "Third.", "Speaker B"),
+        ]
+        result = build_plain_paragraphs(sentences)
+        # A-pause-A-pause-B: three paragraphs, three prefixes.
+        assert result == (
+            "**Speaker A:** First.\n\n"
+            "**Speaker A:** Second.\n\n"
+            "**Speaker B:** Third."
+        )
+
+    def test_none_speaker_emits_no_prefix(self):
+        # Mixed None/Some should not crash; the None sentence just skips the
+        # prefix while still honoring its pause-based paragraph boundary.
+        sentences = [
+            _speaker_sent(0.0, 1.0, "Anon.", None),
+            _speaker_sent(1.0 + PARAGRAPH_GAP_SECS + 0.1, 3.0, "Known.", "Speaker A"),
+        ]
+        result = build_plain_paragraphs(sentences)
+        assert result == "Anon.\n\n**Speaker A:** Known."
+
+    def test_speaker_change_requires_both_sides_labelled(self):
+        # A speaker "change" only counts when BOTH sentences have a label.
+        # None -> "A" is "label appeared," not a change — with a small pause
+        # gap, the sentences stay in one paragraph and no prefix is emitted
+        # mid-paragraph even though the second sentence has a speaker.
+        sentences = [
+            _speaker_sent(0.0, 1.0, "Anon.", None),
+            _speaker_sent(1.05, 2.0, "Known.", "Speaker A"),
+        ]
+        assert build_plain_paragraphs(sentences) == "Anon. Known."
+
+
+class TestBuildTimestampedParagraphsWithSpeakers:
+    def test_no_speakers_matches_legacy(self):
+        sentences = [_sent(5.0, 6.0, "Hi.")]
+        assert build_timestamped_paragraphs(sentences) == "[00:00:05] Hi."
+
+    def test_speaker_prefix_after_timestamp(self):
+        sentences = [_speaker_sent(5.0, 6.0, "Hi.", "Speaker A")]
+        assert (
+            build_timestamped_paragraphs(sentences) == "[00:00:05] **Speaker A:** Hi."
+        )
+
+    def test_speaker_change_breaks_and_reprefixes(self):
+        sentences = [
+            _speaker_sent(0.0, 1.0, "Hello.", "Speaker A"),
+            _speaker_sent(1.05, 2.0, "Hi there.", "Speaker B"),
+        ]
+        result = build_timestamped_paragraphs(sentences)
+        assert result.split("\n") == [
+            "[00:00:00] **Speaker A:** Hello.",
+            "",
+            "[00:00:01] **Speaker B:** Hi there.",
+        ]
+
+    def test_prefix_not_repeated_within_paragraph(self):
+        # Two sentences, same speaker, small gap: both get timestamps but
+        # only the FIRST line gets the speaker prefix (it's paragraph-start).
+        sentences = [
+            _speaker_sent(0.0, 1.0, "First.", "Speaker A"),
+            _speaker_sent(1.05, 2.0, "Second.", "Speaker A"),
+        ]
+        result = build_timestamped_paragraphs(sentences)
+        assert result.split("\n") == [
+            "[00:00:00] **Speaker A:** First.",
+            "[00:00:01] Second.",
+        ]

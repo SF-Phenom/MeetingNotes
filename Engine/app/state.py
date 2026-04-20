@@ -55,6 +55,14 @@ class State:
     # Reminders list name when exporter_backend == "apple_reminders".
     # Created on first export if it doesn't exist.
     apple_reminders_list: str = "MeetingNotes"
+    # Experimental speaker-diarization toggle. When True AND a diarizer
+    # backend is available (see app/diarizer.py), the batch pipeline
+    # assigns Speaker A / Speaker B / … labels to paragraphs in the
+    # post-record .md transcript. Defaults off; intentionally not exposed
+    # in the menubar yet — flipped via direct state.json edit or the
+    # MEETINGNOTES_DIARIZATION env var until the feature is ready for a
+    # visible toggle.
+    diarization_enabled: bool = False
 
     @classmethod
     def from_raw(cls, raw: dict) -> "State":
@@ -86,6 +94,7 @@ DEFAULT_STATE = {
     "transcription_engine": "parakeet",
     "exporter_backend": "disabled",
     "apple_reminders_list": "MeetingNotes",
+    "diarization_enabled": False,
 }
 
 

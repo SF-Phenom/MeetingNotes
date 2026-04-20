@@ -44,11 +44,18 @@ class Sentence:
     engines without token-level timings (Apple Speech), in which case
     gap math falls back to ``end`` and simply never triggers — paragraph
     breaks are a Parakeet-only feature.
+
+    ``speaker`` holds the diarization label (e.g. "Speaker A") assigned
+    by ``speaker_alignment.assign_speakers`` when diarization ran on the
+    recording. ``None`` means diarization was disabled or the sentence
+    had no overlap with any diarizer segment; the formatter falls back
+    to its non-speaker behavior in both cases.
     """
     start: float
     end: float
     text: str
     speech_end: float | None = None
+    speaker: str | None = None
 
 
 def _pause_end(sent: Sentence) -> float:
@@ -56,13 +63,25 @@ def _pause_end(sent: Sentence) -> float:
     return sent.speech_end if sent.speech_end is not None else sent.end
 
 
-def _is_paragraph_boundary(prev: Sentence, cur: Sentence) -> bool:
+def _is_pause_boundary(prev: Sentence, cur: Sentence) -> bool:
     gap = cur.start - _pause_end(prev)
     if gap <= 0:
         return False
     if prev.text.rstrip().endswith(SENTENCE_TERMINATORS):
         return gap >= SENTENCE_END_GAP_SECS
     return gap >= PARAGRAPH_GAP_SECS
+
+
+def _is_speaker_change(prev: Sentence, cur: Sentence) -> bool:
+    # A speaker change only counts when both sentences have a label —
+    # a None on either side is "unknown speaker here," not a real change.
+    if prev.speaker is None or cur.speaker is None:
+        return False
+    return prev.speaker != cur.speaker
+
+
+def _is_paragraph_boundary(prev: Sentence, cur: Sentence) -> bool:
+    return _is_pause_boundary(prev, cur) or _is_speaker_change(prev, cur)
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -74,15 +93,29 @@ def _format_timestamp(seconds: float) -> str:
     return f"[{h:02d}:{m:02d}:{s:02d}]"
 
 
+def _speaker_prefix(sent: Sentence) -> str:
+    """Bold speaker label emitted at the start of each speaker-owned paragraph."""
+    if sent.speaker is None:
+        return ""
+    return f"**{sent.speaker}:** "
+
+
 def build_plain_paragraphs(sentences: list[Sentence]) -> str:
-    """Join sentences with ``\\n\\n`` on pause boundaries, single space otherwise."""
+    """Join sentences with ``\\n\\n`` on paragraph boundaries, single space otherwise.
+
+    A paragraph boundary is a pause gap OR a speaker change. When a sentence
+    has ``speaker`` set, a ``**Speaker X:** `` prefix is emitted at the
+    start of each paragraph. Sentences without a speaker render as before.
+    """
     cleaned = [s for s in sentences if s.text.strip()]
     if not cleaned:
         return ""
-    parts: list[str] = [cleaned[0].text.strip()]
+    parts: list[str] = [_speaker_prefix(cleaned[0]) + cleaned[0].text.strip()]
     for prev, cur in zip(cleaned, cleaned[1:]):
-        sep = "\n\n" if _is_paragraph_boundary(prev, cur) else " "
-        parts.append(sep + cur.text.strip())
+        if _is_paragraph_boundary(prev, cur):
+            parts.append("\n\n" + _speaker_prefix(cur) + cur.text.strip())
+        else:
+            parts.append(" " + cur.text.strip())
     return "".join(parts)
 
 
@@ -90,14 +123,19 @@ def build_timestamped_paragraphs(sentences: list[Sentence]) -> str:
     """One timestamped line per sentence; blank line between paragraphs.
 
     Blank lines map to ``\\n\\n`` in the rendered markdown, which every
-    reasonable renderer treats as a real paragraph break.
+    reasonable renderer treats as a real paragraph break. Paragraph
+    boundaries fire on pause gaps OR speaker changes; when a sentence
+    starts a new paragraph and has a ``speaker`` set, its line is prefixed
+    with ``**Speaker X:** `` after the timestamp.
     """
     cleaned = [s for s in sentences if s.text.strip()]
     if not cleaned:
         return ""
     lines: list[str] = []
     for i, sent in enumerate(cleaned):
-        if i > 0 and _is_paragraph_boundary(cleaned[i - 1], sent):
+        is_new_paragraph = i == 0 or _is_paragraph_boundary(cleaned[i - 1], sent)
+        if i > 0 and is_new_paragraph:
             lines.append("")
-        lines.append(f"{_format_timestamp(sent.start)} {sent.text.strip()}")
+        prefix = _speaker_prefix(sent) if is_new_paragraph else ""
+        lines.append(f"{_format_timestamp(sent.start)} {prefix}{sent.text.strip()}")
     return "\n".join(lines)

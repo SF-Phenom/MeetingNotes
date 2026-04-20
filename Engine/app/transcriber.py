@@ -303,6 +303,14 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
                 speech_end=orig.speech_end,
             )
         )
+
+    # Optional diarization: if the user opted in AND a backend is available,
+    # assign Speaker A / Speaker B / … labels to each sentence by max time
+    # overlap with the diarizer's segments. Any failure here is logged and
+    # swallowed — we'd rather ship a transcript without speaker labels than
+    # lose one over a diarization bug.
+    filtered_sentences = _diarize_if_enabled(wav_path, filtered_sentences)
+
     timestamped_text = build_timestamped_paragraphs(filtered_sentences)
     plain_text = build_plain_paragraphs(filtered_sentences)
 
@@ -366,3 +374,57 @@ def _speech_end(sent, time_offset: float) -> float:
             return tok.end + time_offset
     # Degenerate case: whole sentence is punctuation. Fall back to sent.end.
     return sent.end + time_offset
+
+
+# Env var override for the diarization_enabled state flag. Accepts the
+# usual truthy strings ("1", "true", "yes", "on") case-insensitively;
+# anything else (including unset) defers to state.json. Lets developers
+# exercise the diarization path without having to edit state.json by hand.
+DIARIZATION_ENABLED_ENV_VAR = "MEETINGNOTES_DIARIZATION"
+
+
+def _diarization_enabled() -> bool:
+    """Resolve the diarization flag: env var override > state.json > default."""
+    env = os.environ.get(DIARIZATION_ENABLED_ENV_VAR, "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    try:
+        from app.state import State
+        return State.load().diarization_enabled
+    except Exception as e:  # noqa: BLE001 — diarization must never break transcription
+        logger.warning("Could not read diarization flag from state (%s); treating as off.", e)
+        return False
+
+
+def _diarize_if_enabled(wav_path: str, sentences):
+    """Assign speaker labels in-place when diarization is enabled and available.
+
+    Returns the input list unchanged when diarization is off, when no
+    backend is registered, or when the backend fails. Never raises —
+    speaker labels are a nice-to-have and must not break transcription.
+    """
+    if not _diarization_enabled():
+        return sentences
+    try:
+        from app.diarizer import get_diarizer
+        diarizer = get_diarizer()
+        if diarizer is None:
+            logger.info("Diarization enabled but no backend registered; skipping.")
+            return sentences
+        segments = diarizer.diarize(wav_path)
+        if not segments:
+            logger.info("Diarizer returned no segments for %s.", os.path.basename(wav_path))
+            return sentences
+        from app.speaker_alignment import assign_speakers
+        labelled = assign_speakers(sentences, segments)
+        n_labelled = sum(1 for s in labelled if s.speaker is not None)
+        logger.info(
+            "Diarization assigned speakers to %d/%d sentences (%d segments).",
+            n_labelled, len(labelled), len(segments),
+        )
+        return labelled
+    except Exception as e:  # noqa: BLE001 — diarization failure is non-fatal
+        logger.warning("Diarization failed (non-fatal), continuing without speakers: %s", e)
+        return sentences
