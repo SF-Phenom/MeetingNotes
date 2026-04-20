@@ -82,6 +82,11 @@ SPEECH_TRANSCRIBE_BIN = os.path.join(
     SPEECH_TRANSCRIBE_APP, "Contents", "MacOS", "speech-transcribe",
 )
 
+# FluidAudio-backed diarization CLI (built from Engine/Diarize).
+# Optional — only required when speaker diarization is enabled. When
+# missing, the pipeline runs without speaker labels.
+DIARIZE_BIN = os.path.join(BIN_DIR, "meetingnotes-diarize")
+
 
 # --- Model expectations ------------------------------------------------------
 

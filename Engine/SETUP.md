@@ -248,7 +248,43 @@ Select "Apple Speech" in the menubar → Transcription Engine submenu.
 
 ---
 
-## 12. Obsidian (Transcript Viewer)
+## 12. Speaker Diarization (Experimental)
+
+Optional. Builds `meetingnotes-diarize` so the menubar can later expose
+speaker-labelled transcripts (`**Speaker A:** …`). The feature is off by
+default and currently has no menubar toggle — enable it via env var
+while we soak the implementation on real meetings.
+
+```bash
+cd ~/MeetingNotes/Engine/Diarize
+swift build -c release
+mkdir -p ~/MeetingNotes/Engine/.bin
+cp .build/release/Diarize ~/MeetingNotes/Engine/.bin/meetingnotes-diarize
+codesign -s - --force ~/MeetingNotes/Engine/.bin/meetingnotes-diarize
+```
+
+The first Swift build fetches [FluidAudio](https://github.com/FluidInference/FluidAudio)
+from SPM — ~1 min on first run. `setup.command` runs this step automatically;
+the instructions above are for manual/advanced setups.
+
+**To turn diarization on** while it's experimental, add these to a
+gitignored `Engine/.env.local` in the install directory:
+
+```
+MEETINGNOTES_DIARIZATION=1
+```
+
+The FluidAudio CoreML model weights (~200–400 MB) download lazily on the
+first diarized meeting and cache under `~/.cache/fluidaudio/`. Community-1
+(the MIT-licensed default, any number of speakers) is used for meetings
+with more than 4 invitees; Sortformer (CC-BY-NC, capped at 4 speakers,
+better accuracy on small meetings) is used for meetings with 4 or fewer.
+When the Google Calendar integration doesn't return a participant count,
+community-1 is used as the safe default.
+
+---
+
+## 13. Obsidian (Transcript Viewer)
 
 Install [Obsidian](https://obsidian.md/) to browse and search your meeting transcripts:
 
@@ -266,7 +302,7 @@ Then open Obsidian → **Open folder as vault** → select `~/MeetingNotes/trans
 
 ---
 
-## 13. macOS Permissions
+## 14. macOS Permissions
 
 The app needs several permissions. macOS will prompt you the first time each is needed:
 
@@ -285,7 +321,7 @@ The app needs several permissions. macOS will prompt you the first time each is 
 
 ---
 
-## 14. Run the App
+## 15. Run the App
 
 ```bash
 cd ~/MeetingNotes
@@ -299,7 +335,7 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 
 ---
 
-## 15. First-Run Checklist
+## 16. First-Run Checklist
 
 - [ ] Menu bar icon appears (🎙)
 - [ ] Edit `Settings/context.md` with your role, team, and meeting info
@@ -318,6 +354,8 @@ Or just double-click `LaunchMeetingNotes.command` in Finder.
 |---|---|---|
 | `MEETINGNOTES_HOME` | `~/MeetingNotes` | Base directory for the project |
 | `ANTHROPIC_API_KEY` | (none) | Claude API key for summarization |
+| `MEETINGNOTES_DIARIZATION` | (unset) | `1` to enable experimental speaker labels; overrides state.json |
+| `MEETINGNOTES_DIARIZER` | (unset, auto-detects Swift binary) | Force a backend: `fluidaudio` (default when binary exists) or `fake` (testing) |
 
 ---
 

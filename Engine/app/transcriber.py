@@ -143,7 +143,9 @@ def _transcribe_chunk(model, wav_chunk_path: str, decoding) -> object:
     return result
 
 
-def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
+def transcribe_with_parakeet(
+    wav_path: str, *, hints: dict | None = None,
+) -> TranscriptionResult:
     """
     Transcribe a .wav file using parakeet-mlx.
 
@@ -152,6 +154,9 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
 
     Args:
         wav_path: Absolute path to the .wav file.
+        hints: Optional pipeline-layer context. Currently read:
+            ``participant_count: int`` — drives diarizer model routing
+            (see :func:`_pick_diarizer_model`). Unknown keys are ignored.
 
     Returns:
         TranscriptionResult with plain text, timestamped text, and duration.
@@ -309,7 +314,9 @@ def transcribe_with_parakeet(wav_path: str) -> TranscriptionResult:
     # overlap with the diarizer's segments. Any failure here is logged and
     # swallowed — we'd rather ship a transcript without speaker labels than
     # lose one over a diarization bug.
-    filtered_sentences = _diarize_if_enabled(wav_path, filtered_sentences)
+    filtered_sentences = _diarize_if_enabled(
+        wav_path, filtered_sentences, hints=hints,
+    )
 
     timestamped_text = build_timestamped_paragraphs(filtered_sentences)
     plain_text = build_plain_paragraphs(filtered_sentences)
@@ -398,7 +405,30 @@ def _diarization_enabled() -> bool:
         return False
 
 
-def _diarize_if_enabled(wav_path: str, sentences):
+# Threshold above which we fall back from Sortformer to community-1.
+# Sortformer caps out at 4 speakers; community-1 has no cap. The count
+# we're comparing against is *total* meeting headcount (user included),
+# which is what ``_build_engine_hints`` populates.
+_SORTFORMER_MAX_PARTICIPANTS = 4
+
+
+def _pick_diarizer_model(hints: dict | None) -> str:
+    """Choose between FluidAudio's community-1 and sortformer backends.
+
+    Small meetings (≤4 total attendees per the calendar) get Sortformer's
+    better DER; anything bigger or unknown stays on community-1, which
+    handles any number of speakers. ``FluidAudioDiarizer`` treats unknown
+    model strings as community-1, so this never returns an invalid value
+    for the wrapper.
+    """
+    if hints:
+        count = hints.get("participant_count")
+        if isinstance(count, int) and count > 0 and count <= _SORTFORMER_MAX_PARTICIPANTS:
+            return "sortformer"
+    return "community-1"
+
+
+def _diarize_if_enabled(wav_path: str, sentences, *, hints: dict | None = None):
     """Assign speaker labels in-place when diarization is enabled and available.
 
     Returns the input list unchanged when diarization is off, when no
@@ -413,7 +443,9 @@ def _diarize_if_enabled(wav_path: str, sentences):
         if diarizer is None:
             logger.info("Diarization enabled but no backend registered; skipping.")
             return sentences
-        segments = diarizer.diarize(wav_path)
+        model = _pick_diarizer_model(hints)
+        logger.info("Running diarizer (model=%s) on %s", model, os.path.basename(wav_path))
+        segments = diarizer.diarize(wav_path, model=model)
         if not segments:
             logger.info("Diarizer returned no segments for %s.", os.path.basename(wav_path))
             return sentences

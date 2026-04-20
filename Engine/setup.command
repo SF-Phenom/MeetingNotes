@@ -11,11 +11,12 @@ set -euo pipefail
 BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
 ENGINE_DIR="$BASE_DIR/Engine"
 CAPTURE_BINARY="$ENGINE_DIR/.bin/capture-audio"
+DIARIZE_BINARY="$ENGINE_DIR/.bin/meetingnotes-diarize"
 VENV_DIR="$ENGINE_DIR/.venv"
 REPO_URL="https://github.com/SF-Phenom/MeetingNotes.git"
-SCRIPT_VERSION="2"
+SCRIPT_VERSION="3"
 CURRENT_STEP=0
-TOTAL_STEPS=13
+TOTAL_STEPS=14
 
 # -- Colors ---------------------------------------------------
 RED='\033[0;31m'
@@ -357,9 +358,50 @@ else
 fi
 
 # ============================================================
-# STEP 7: Directory Structure
+# STEP 7: Swift Diarization Binary (experimental speaker labels)
 # ============================================================
-step 7 "Directory structure"
+#
+# Shipped even when diarization_enabled is False in state.json — the
+# binary itself is inert without the user flipping the flag, and
+# building it here means the feature is one toggle away rather than
+# "oh, you need to re-run setup first." FluidAudio's CoreML bundles
+# are downloaded lazily on first diarization run, not here, to keep
+# setup under the "one coffee" bar.
+step 7 "Swift diarization binary (experimental)"
+
+if [[ -x "$DIARIZE_BINARY" ]]; then
+    already "meetingnotes-diarize binary"
+else
+    info "Building Diarize (Swift + FluidAudio)..."
+    # Build in /tmp to avoid cloud sync (Google Drive/iCloud) locking build files
+    build_tmp=$(mktemp -d)
+    cd "$ENGINE_DIR/Diarize"
+    # First build will fetch the FluidAudio SPM package (~1 min on first run).
+    if ! swift build -c release --scratch-path "$build_tmp" 2>&1 | tail -5; then
+        warn "Diarize build failed — speaker labels will be unavailable."
+        warn "Transcription itself is unaffected. Re-run setup.command to retry."
+        rm -rf "$build_tmp"
+        cd "$BASE_DIR"
+    else
+        if [[ ! -f "$build_tmp/release/Diarize" ]]; then
+            warn "Diarize build completed but binary not found — skipping."
+            rm -rf "$build_tmp"
+            cd "$BASE_DIR"
+        else
+            mkdir -p "$ENGINE_DIR/.bin"
+            cp "$build_tmp/release/Diarize" "$DIARIZE_BINARY"
+            rm -rf "$build_tmp"
+            codesign -s - --force "$DIARIZE_BINARY" >/dev/null 2>&1 || true
+            cd "$BASE_DIR"
+            success "meetingnotes-diarize built and installed"
+        fi
+    fi
+fi
+
+# ============================================================
+# STEP 8: Directory Structure
+# ============================================================
+step 8 "Directory structure"
 
 mkdir -p "$ENGINE_DIR/recordings/active"
 mkdir -p "$ENGINE_DIR/recordings/queue"
@@ -372,9 +414,9 @@ mkdir -p "$ENGINE_DIR/.credentials"
 success "Directories ready"
 
 # ============================================================
-# STEP 8: state.json
+# STEP 9: state.json
 # ============================================================
-step 8 "state.json"
+step 9 "state.json"
 
 if [[ -f "$ENGINE_DIR/state.json" ]]; then
     already "state.json"
@@ -395,9 +437,9 @@ EOF
 fi
 
 # ============================================================
-# STEP 9: Anthropic API Key
+# STEP 10: Anthropic API Key
 # ============================================================
-step 9 "Anthropic API key"
+step 10 "Anthropic API key"
 
 api_key_set=false
 
@@ -448,7 +490,7 @@ fi
 # ============================================================
 # STEP 11: Obsidian
 # ============================================================
-step 10 "Obsidian (transcript viewer)"
+step 11 "Obsidian (transcript viewer)"
 
 if [[ -d "/Applications/Obsidian.app" ]] || brew list --cask obsidian &>/dev/null 2>&1; then
     already "Obsidian"
@@ -470,7 +512,7 @@ fi
 # ============================================================
 # STEP 12: Ollama (local AI for summaries)
 # ============================================================
-step 11 "Ollama (local AI for summaries)"
+step 12 "Ollama (local AI for summaries)"
 
 if command -v ollama &>/dev/null || [[ -d "/Applications/Ollama.app" ]]; then
     already "Ollama"
@@ -509,7 +551,7 @@ fi
 # ============================================================
 # STEP 13: Google Calendar (Optional)
 # ============================================================
-step 12 "Google Calendar integration (optional)"
+step 13 "Google Calendar integration (optional)"
 
 # Seed the OAuth client JSON from the repo-tracked default if the user
 # doesn't already have one. Shipping a shared installed-app OAuth client
@@ -607,6 +649,7 @@ check "ffmpeg"                  "command -v ffmpeg"
 check "Python venv"             "test -f $VENV_DIR/bin/python"
 check "Python packages"         "$VENV_DIR/bin/python -c 'import rumps, psutil, anthropic'"
 check "capture-audio"           "test -x $CAPTURE_BINARY"
+check "meetingnotes-diarize"    "test -x $DIARIZE_BINARY"
 check "Ollama"                  "command -v ollama"
 check "Qwen model"             "ollama list 2>/dev/null | grep -q qwen3:4b"
 check "Obsidian"                "test -d /Applications/Obsidian.app"

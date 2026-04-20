@@ -96,6 +96,28 @@ def _load_context_md() -> str:
         return ""
 
 
+def _build_engine_hints(metadata: dict) -> dict:
+    """Derive the ``hints`` payload handed to batch engines.
+
+    Currently just carries ``participant_count`` — the number of meeting
+    attendees the calendar knew about (the user + everyone invited,
+    minus resource rooms). The Parakeet engine uses this to pick between
+    FluidAudio's community-1 (unlimited speakers) and Sortformer (capped
+    at 4, better DER on small meetings).
+
+    Returns ``{}`` when we have no calendar-derived participant list;
+    consumers treat absent / None as "unknown, use the safe default."
+    """
+    participants = metadata.get("participants")
+    if not isinstance(participants, str) or not participants.strip():
+        return {}
+    # participants is a ", "-joined display-name list of OTHER attendees —
+    # the user is filtered out upstream (calendar_lookup.py). Add 1 for
+    # the user to get the full meeting headcount.
+    n_others = len([p for p in participants.split(",") if p.strip()])
+    return {"participant_count": n_others + 1}
+
+
 def _resolve_base_title(metadata: dict, summary, source: str) -> str:
     """Pick the working title for a transcript, preferring calendar over LLM.
 
@@ -320,7 +342,8 @@ def process_recording(
         try:
             engine = get_batch_engine()
             logger.info("Transcribing with %s", type(engine).__name__)
-            transcription = engine.transcribe(transcribe_path)
+            hints = _build_engine_hints(metadata)
+            transcription = engine.transcribe(transcribe_path, hints=hints)
             logger.info(
                 "Transcription done: %d chars, %d min",
                 len(transcription.plain_text),

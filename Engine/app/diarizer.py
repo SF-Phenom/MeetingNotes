@@ -48,9 +48,16 @@ class Diarizer(Protocol):
     in those cases. Returning ``None`` signals an unrecoverable failure
     the pipeline should treat as "no diarization this time" without
     failing the whole transcription.
+
+    ``model`` is an optional backend-specific hint (e.g. ``"community-1"``
+    or ``"sortformer"`` for the FluidAudio backend). Implementations that
+    don't understand the value — including the test double — silently
+    ignore it.
     """
 
-    def diarize(self, wav_path: str) -> list[SpeakerSegment] | None: ...
+    def diarize(
+        self, wav_path: str, model: str | None = None,
+    ) -> list[SpeakerSegment] | None: ...
 
 
 class FakeDiarizer:
@@ -76,7 +83,13 @@ class FakeDiarizer:
         self._period = period_secs
         self._speakers = speakers
 
-    def diarize(self, wav_path: str) -> list[SpeakerSegment]:
+    def diarize(
+        self, wav_path: str, model: str | None = None,
+    ) -> list[SpeakerSegment]:
+        # ``model`` is accepted to conform to the Diarizer Protocol but has
+        # no meaning for the fake — we always produce the same alternating
+        # output regardless of which backend the caller asked for.
+        del model
         try:
             with wave.open(wav_path, "rb") as w:
                 frames = w.getnframes()
@@ -110,8 +123,11 @@ def get_diarizer() -> Diarizer | None:
 
     Order of precedence:
 
-    1. ``MEETINGNOTES_DIARIZER=fake`` ⇒ :class:`FakeDiarizer`.
-    2. Otherwise ``None`` — real backends will register here in a later commit.
+    1. Explicit ``MEETINGNOTES_DIARIZER`` env var (``fake`` or
+       ``fluidaudio``) selects that backend.
+    2. Otherwise — if the FluidAudio Swift binary exists on disk — use it.
+    3. Otherwise ``None``. The caller treats this as "no diarization this
+       time" without failing the pipeline.
 
     The caller is responsible for also checking
     ``state.diarization_enabled`` before invoking this; the two gates are
@@ -121,10 +137,22 @@ def get_diarizer() -> Diarizer | None:
     backend = os.environ.get(DIARIZER_ENV_VAR, "").strip().lower()
     if backend == "fake":
         return FakeDiarizer()
+    if backend == "fluidaudio":
+        from app.diarizer_fluidaudio import FluidAudioDiarizer
+        return FluidAudioDiarizer()
     if backend:
         logger.warning(
             "Unknown diarizer backend %r in %s; running without diarization.",
             backend,
             DIARIZER_ENV_VAR,
         )
+        return None
+
+    # No explicit selection — auto-detect by checking for the Swift binary.
+    # This is what ships to users: they enable diarization_enabled, and the
+    # FluidAudio backend gets picked up if setup.command built its binary.
+    from app.diarizer_fluidaudio import is_available as fluidaudio_available
+    if fluidaudio_available():
+        from app.diarizer_fluidaudio import FluidAudioDiarizer
+        return FluidAudioDiarizer()
     return None
