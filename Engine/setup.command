@@ -293,12 +293,27 @@ else
     already "Python venv + packages"
 fi
 
-# Pre-download the Parakeet model (~2.5 GB, cached in ~/.cache/huggingface/)
-if "$VENV_DIR/bin/python" -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')" &>/dev/null; then
+# Pre-download the Parakeet model (~2.5 GB, cached in ~/.cache/huggingface/).
+#
+# We sniff the HuggingFace cache dir directly rather than letting Python
+# try-and-download. The old version ran from_pretrained() inside a silent
+# `if` check, which would download 2.5 GB with &>/dev/null suppressing
+# progress — users saw a frozen terminal for minutes with no feedback,
+# and a failed download would trigger a second (also silent-progress)
+# attempt in the else branch.
+#
+# With the cache-dir check, the download path runs exactly once with
+# HuggingFace's native progress bars visible, and cached runs skip the
+# Python startup entirely.
+HF_CACHE_DIR="$HOME/.cache/huggingface/hub/models--mlx-community--parakeet-tdt-0.6b-v3"
+if [[ -d "$HF_CACHE_DIR/snapshots" ]] \
+   && [[ -n "$(ls -A "$HF_CACHE_DIR/snapshots" 2>/dev/null)" ]]; then
     already "Parakeet model"
 else
-    info "Downloading Parakeet model (~2.5 GB, this may take a few minutes)..."
-    "$VENV_DIR/bin/python" -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')"
+    info "Downloading Parakeet model (~2.5 GB, 3–10 minutes depending on connection)..."
+    info "Progress bars will appear below — do not interrupt."
+    "$VENV_DIR/bin/python" -c "from parakeet_mlx import from_pretrained; from_pretrained('mlx-community/parakeet-tdt-0.6b-v3')" \
+        || fail "Parakeet model download failed. Check your internet connection and re-run setup.command."
     success "Parakeet model downloaded"
 fi
 
