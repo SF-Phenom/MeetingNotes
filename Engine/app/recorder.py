@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import signal
+import struct
 import logging
 import subprocess
 import threading
@@ -289,6 +290,80 @@ def is_recording() -> bool:
     return _process.poll() is None
 
 
+# Fixed 44-byte PCM WAV header layout that the Swift capture binary writes.
+# When the binary is SIGKILLed mid-recording (e.g. parent Python crashed and
+# orphan-recovery killed it on relaunch) it never gets to seek back and
+# patch the RIFF chunk size (offset 4) or the data chunk size (offset 40),
+# both of which remain 0. Result: VLC plays the file (it reads to EOF), but
+# strict parsers — macOS QuickLook and Parakeet's WAV reader — reject it as
+# "not a WAVE file" and the recording is lost. Repair is trivial: the PCM
+# data itself is intact; we just need to patch the two size fields from the
+# actual on-disk file size.
+_WAV_HEADER_SIZE = 44
+_WAV_RIFF_SIZE_OFFSET = 4
+_WAV_DATA_SIZE_OFFSET = 40
+
+
+def _repair_truncated_wav_header(path: str) -> bool:
+    """Patch a WAV file whose length fields were never finalized.
+
+    Returns True when a repair was applied, False when the file was
+    already valid (or isn't a shape we recognize — we only touch the
+    exact broken pattern the Swift binary leaves behind). Never raises:
+    if the file can't be opened for writing we log and move on, because
+    the caller is recovering an orphaned recording and we shouldn't
+    abort the whole recovery for one bad file.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError as e:
+        logger.warning("Could not stat WAV for repair check: %s (%s)", path, e)
+        return False
+
+    if size < _WAV_HEADER_SIZE:
+        # Too small to be a PCM WAV — bail rather than guess.
+        return False
+
+    try:
+        with open(path, "rb") as f:
+            head = f.read(_WAV_HEADER_SIZE)
+    except OSError as e:
+        logger.warning("Could not read WAV header: %s (%s)", path, e)
+        return False
+
+    if head[0:4] != b"RIFF" or head[8:12] != b"WAVE" or head[36:40] != b"data":
+        # Not the standard layout we write — leave it alone so we don't
+        # corrupt a legitimately-different format.
+        return False
+
+    riff_size = struct.unpack("<I", head[_WAV_RIFF_SIZE_OFFSET:_WAV_RIFF_SIZE_OFFSET + 4])[0]
+    data_size = struct.unpack("<I", head[_WAV_DATA_SIZE_OFFSET:_WAV_DATA_SIZE_OFFSET + 4])[0]
+    if riff_size != 0 or data_size != 0:
+        # Header already carries sizes (matches or doesn't — we don't
+        # second-guess). Only the exact "both fields still zero"
+        # pattern is a SIGKILLed-capture signature worth patching.
+        return False
+
+    new_riff_size = size - 8
+    new_data_size = size - _WAV_HEADER_SIZE
+
+    try:
+        with open(path, "r+b") as f:
+            f.seek(_WAV_RIFF_SIZE_OFFSET)
+            f.write(struct.pack("<I", new_riff_size))
+            f.seek(_WAV_DATA_SIZE_OFFSET)
+            f.write(struct.pack("<I", new_data_size))
+    except OSError as e:
+        logger.warning("Could not patch WAV header for %s: %s", path, e)
+        return False
+
+    logger.info(
+        "Repaired truncated WAV header: %s (RIFF=%d, data=%d)",
+        path, new_riff_size, new_data_size,
+    )
+    return True
+
+
 def check_orphaned_recording() -> None:
     """
     On startup, check for a .lock file without a live process.
@@ -342,6 +417,12 @@ def check_orphaned_recording() -> None:
             if not fname.lower().endswith(".wav"):
                 continue
             src = os.path.join(ACTIVE_DIR, fname)
+            # Patch the header before the move so the file arrives in
+            # queue/ playable by QuickLook and readable by the pipeline.
+            # An un-repaired file will still move (we don't want to lose
+            # audio), but the next pipeline pass would fail it as "not a
+            # WAVE file" and the recording would be stranded.
+            _repair_truncated_wav_header(src)
             try:
                 RecordingFile(src).move_to(QUEUE_DIR)
                 logger.info("Moved orphaned recording: %s -> %s", src, QUEUE_DIR)
