@@ -369,7 +369,22 @@ fi
 # setup under the "one coffee" bar.
 step 7 "Swift diarization binary (experimental)"
 
-if [[ -x "$DIARIZE_BINARY" ]]; then
+need_diarize_rebuild=false
+if [[ ! -x "$DIARIZE_BINARY" ]]; then
+    need_diarize_rebuild=true
+else
+    # Rebuild if Package.swift or any Sources/*.swift is newer than the binary.
+    # Without this, iterative Swift edits silently don't deploy on setup re-run.
+    for src in "$ENGINE_DIR/Diarize/Package.swift" "$ENGINE_DIR/Diarize/Sources/"**/*.swift(N); do
+        if [[ -f "$src" && "$src" -nt "$DIARIZE_BINARY" ]]; then
+            info "Diarize source newer than binary — rebuilding..."
+            need_diarize_rebuild=true
+            break
+        fi
+    done
+fi
+
+if ! $need_diarize_rebuild; then
     already "meetingnotes-diarize binary"
 else
     info "Building Diarize (Swift + FluidAudio)..."
