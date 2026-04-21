@@ -500,8 +500,38 @@ class MeetingNotesApp(rumps.App):
         )
 
     def _quit(self, _sender) -> None:
-        """Quit menu item — stop recording cleanly before exiting."""
-        logger.info("Quit requested")
+        """Quit menu item — stop recording cleanly before exiting.
+
+        ``sender`` is surfaced in the log so future incidents can tell a
+        user click (NSMenuItem) from a macOS-triggered graceful
+        terminate (None / NSApp) — 2026-04-21 had a Quit in the log
+        with no user recollection of clicking it, and we had no signal
+        to distinguish memory-pressure-induced termination from an
+        accidental Cmd-Q.
+        """
+        was_recording = recorder.is_recording()
+        logger.info(
+            "Quit requested (sender=%r, was_recording=%s)",
+            _sender,
+            was_recording,
+        )
+
+        # Drop in-flight state BEFORE tearing subprocesses down.
+        # rumps.quit_application() below is async — between this call
+        # and actual process exit, the 1-second _recording_elapsed_tick
+        # can fire at least once. If _recording_start were still set
+        # when recorder.stop_recording() has already cleared _process,
+        # the tick calls _recover_from_dead_recording which rebuilds
+        # the idle menu. When that coincides with rumps failing to
+        # fully terminate (2026-04-21 incident), the user sees a
+        # zombie idle menu with the pending-transcript icon and
+        # reasonably concludes the recording silently stopped.
+        self._recording_start = None
+        try:
+            self._orchestrator.clear_prompt()
+        except Exception as e:  # noqa: BLE001 — quit must always finish
+            logger.error("Error clearing call prompt during quit: %s", e)
+
         try:
             self._transcription.shutdown()
         except Exception as e:
