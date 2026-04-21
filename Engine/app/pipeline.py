@@ -116,10 +116,15 @@ def _load_context_md() -> str:
 # anything else (including unset) defers to state.json.
 DIARIZATION_ENABLED_ENV_VAR = "MEETINGNOTES_DIARIZATION"
 
-# Sortformer caps out at 4 speakers; community-1 has no cap. The threshold
-# is total headcount (user + other attendees). Unknown count or >4 routes
-# to community-1; known count <= 4 routes to sortformer for its better DER.
-_SORTFORMER_MAX_PARTICIPANTS = 4
+# Sortformer caps out at 4 speakers; community-1 has no cap. Threshold
+# is total calendar headcount (user + other attendees). We route up to
+# 6 scheduled attendees to sortformer even though the model only emits
+# 4 tracks: meetings with >3 invitees routinely have 1–2 no-shows, so
+# ≤6 on the calendar usually means ≤4 actually join. When more than 4
+# do join, sortformer bundles the extras under an existing label —
+# acceptable degradation for the DER gain. Unknown count or >6 routes
+# to community-1.
+_SORTFORMER_MAX_PARTICIPANTS = 6
 
 
 def _diarization_enabled() -> bool:
@@ -142,20 +147,26 @@ def _diarization_enabled() -> bool:
 def _pick_diarizer_model(metadata: dict) -> str:
     """Pick between FluidAudio's community-1 and sortformer backends.
 
-    Small meetings (≤4 total attendees per the calendar) get Sortformer's
-    better DER; anything larger or unknown stays on community-1, which
-    handles any number of speakers. ``metadata["participants"]`` is a
-    ", "-joined display-name string of OTHER attendees — the user is
-    filtered out upstream by ``calendar_lookup``, so we add 1 to the
-    count to get total headcount.
+    Sortformer is the default; community-1 only takes over when the
+    calendar tells us the meeting is large (>6 total attendees).
+    Rationale: ad-hoc recordings with no matching calendar event are
+    typically 1:1s, standups, or small syncs, so sortformer's better
+    DER is the right bet. Large unscheduled gatherings exist but are
+    rare, and the cluster-bundling degradation is the same one we
+    already tolerate for scheduled >4-speaker meetings routed to
+    sortformer under the headcount rule above.
+
+    ``metadata["participants"]`` is a ", "-joined display-name string of
+    OTHER attendees — the user is filtered out upstream by
+    ``calendar_lookup``, so we add 1 to the count to get total headcount.
     """
     participants = metadata.get("participants")
     if isinstance(participants, str) and participants.strip():
         n_others = len([p for p in participants.split(",") if p.strip()])
         total = n_others + 1  # +1 for the user
-        if 0 < total <= _SORTFORMER_MAX_PARTICIPANTS:
-            return "sortformer"
-    return "community-1"
+        if total > _SORTFORMER_MAX_PARTICIPANTS:
+            return "community-1"
+    return "sortformer"
 
 
 def _maybe_diarize(wav_path, transcription, metadata):

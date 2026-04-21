@@ -28,32 +28,33 @@ from app.transcriber import TranscriptionResult
 
 
 class TestPickDiarizerModel:
-    def test_no_participants_is_community_1(self):
-        assert _pick_diarizer_model({}) == "community-1"
+    def test_no_participants_defaults_to_sortformer(self):
+        # Ad-hoc recording with no calendar match: assume small meeting.
+        assert _pick_diarizer_model({}) == "sortformer"
 
-    def test_empty_participants_string_is_community_1(self):
-        assert _pick_diarizer_model({"participants": ""}) == "community-1"
-        assert _pick_diarizer_model({"participants": "   "}) == "community-1"
+    def test_empty_participants_string_defaults_to_sortformer(self):
+        assert _pick_diarizer_model({"participants": ""}) == "sortformer"
+        assert _pick_diarizer_model({"participants": "   "}) == "sortformer"
 
-    def test_non_string_participants_is_community_1(self):
+    def test_non_string_participants_defaults_to_sortformer(self):
         # Defensive — metadata might carry a list or None from some edge path.
-        assert _pick_diarizer_model({"participants": None}) == "community-1"
-        assert _pick_diarizer_model({"participants": ["Alice"]}) == "community-1"
+        assert _pick_diarizer_model({"participants": None}) == "sortformer"
+        assert _pick_diarizer_model({"participants": ["Alice"]}) == "sortformer"
 
     def test_single_other_attendee_picks_sortformer(self):
-        # 1 other + user = 2 total → sortformer (≤4).
+        # 1 other + user = 2 total → sortformer (≤6).
         assert _pick_diarizer_model({"participants": "Alice"}) == "sortformer"
 
-    def test_four_total_still_picks_sortformer(self):
-        # 3 others + user = 4 → right at the boundary, still sortformer.
+    def test_six_total_still_picks_sortformer(self):
+        # 5 others + user = 6 → right at the boundary, still sortformer.
         assert _pick_diarizer_model(
-            {"participants": "Alice, Bob, Carol"}
+            {"participants": "A, B, C, D, E"}
         ) == "sortformer"
 
-    def test_five_total_falls_back_to_community_1(self):
-        # 4 others + user = 5 → over the Sortformer cap.
+    def test_seven_total_falls_back_to_community_1(self):
+        # 6 others + user = 7 → over the Sortformer cap.
         assert _pick_diarizer_model(
-            {"participants": "A, B, C, D"}
+            {"participants": "A, B, C, D, E, F"}
         ) == "community-1"
 
     def test_large_meeting_is_community_1(self):
@@ -172,8 +173,9 @@ class TestMaybeDiarize:
         assert "**Speaker B:**" in out.plain_text
         # Sentences list on the result now carries the speaker labels.
         assert all(s.speaker is not None for s in out.sentences)
-        # Subprocess called exactly once with the right wav path.
-        assert diarizer.calls == [("/tmp/x.wav", "community-1")]
+        # Subprocess called exactly once. Empty metadata = no calendar
+        # match → sortformer (the ad-hoc default).
+        assert diarizer.calls == [("/tmp/x.wav", "sortformer")]
 
     def test_routes_sortformer_for_small_meeting(
         self, diarization_on, monkeypatch,
@@ -183,7 +185,7 @@ class TestMaybeDiarize:
         ])
         monkeypatch.setattr("app.diarizer.get_diarizer", lambda: diarizer)
         result = _make_result([Sentence(0.0, 5.0, "hi")])
-        # 2 others + user = 3 ≤ 4 → sortformer.
+        # 2 others + user = 3 ≤ 6 → sortformer.
         _maybe_diarize("/tmp/x.wav", result, {"participants": "Alice, Bob"})
         assert diarizer.calls[0][1] == "sortformer"
 
@@ -195,6 +197,7 @@ class TestMaybeDiarize:
         ])
         monkeypatch.setattr("app.diarizer.get_diarizer", lambda: diarizer)
         result = _make_result([Sentence(0.0, 5.0, "hi")])
+        # 6 others + user = 7 > 6 → community-1.
         _maybe_diarize(
             "/tmp/x.wav", result,
             {"participants": "A, B, C, D, E, F"},
