@@ -196,6 +196,16 @@ class SpeechRealtimeTranscriber:
         return self._thread is not None and self._thread.is_alive()
 
     @property
+    def is_alive(self) -> bool:
+        """True if the background thread is still running.
+
+        Same shape as :attr:`is_busy` for this engine (no MLX state to
+        worry about) but both are present so TranscriptionManager's
+        post-stop check works uniformly across engines.
+        """
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
     def accumulated_sentences(self) -> list:
         """Apple Speech doesn't produce per-sentence timestamps, so speaker
         diarization isn't wired for this engine. Satisfies the

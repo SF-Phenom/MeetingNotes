@@ -171,6 +171,23 @@ class CallOrchestrator:
         logger.info("User skipped call prompt: source=%s", source)
         self._rebuild_menu()
 
+    def clear_prompt(self) -> None:
+        """Drop any pending record-this-call prompt.
+
+        Called from the recovery path when capture-audio dies
+        unexpectedly — otherwise the idle menu rebuilds with BOTH the
+        generic "Start Recording" entry AND the stale "Record <source>
+        call" prompt (the prompt was queued while the old recording was
+        live). The next 10s tick re-surfaces the prompt if the call is
+        still active, so the user isn't stranded — just given a beat to
+        notice what happened.
+        """
+        if self._pending_prompt is None:
+            return
+        source = self._pending_prompt.get("source")
+        self._pending_prompt = None
+        logger.info("Cleared pending call prompt (source=%s)", source)
+
     def suppress_source(self) -> None:
         """User clicked 'Never for <Source>'."""
         if self._pending_prompt is None:

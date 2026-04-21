@@ -463,11 +463,12 @@ class MeetingNotesApp(rumps.App):
         """Clean up after the capture-audio process exits unexpectedly.
 
         Stops the realtime transcriber, clears the recorder lock + state,
-        rebuilds the idle menu, and notifies the user. The recording's
-        partial WAV (if any) stays on disk and will be picked up by the
-        next pipeline sweep — we don't auto-transcribe it here because
-        the realtime engine had no chance to finalize and we don't know
-        whether the file is even valid.
+        drops any stale record-this-call prompt, rebuilds the idle menu,
+        and notifies the user. The recording's partial WAV (if any)
+        stays on disk and will be picked up by the next pipeline sweep —
+        we don't auto-transcribe it here because the realtime engine had
+        no chance to finalize and we don't know whether the file is
+        even valid.
         """
         try:
             self._transcription.stop_realtime()
@@ -480,6 +481,16 @@ class MeetingNotesApp(rumps.App):
             recorder.stop_recording()
         except Exception as e:  # noqa: BLE001
             logger.error("Error clearing recorder state during recovery: %s", e)
+
+        # Drop any call prompt that was queued while the prior recording
+        # was live — otherwise the idle menu would show both a generic
+        # "Start Recording" AND "Record <source> call" right after the
+        # unexpected stop, which is confusing in the exact moment the
+        # user is trying to figure out what just happened.
+        try:
+            self._orchestrator.clear_prompt()
+        except Exception as e:  # noqa: BLE001
+            logger.error("Error clearing call prompt during recovery: %s", e)
 
         self._build_idle_menu()
         rumps.notification(

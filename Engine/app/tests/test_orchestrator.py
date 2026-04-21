@@ -212,3 +212,32 @@ class TestPromptHandlers:
         o, _, _, _, notifications = setup
         o.suppress_source()
         assert notifications == []
+
+    def test_clear_prompt_drops_pending(self, setup):
+        """Recovery path: a prompt queued during a now-dead recording
+        must not linger into the rebuilt idle menu — clearing it keeps
+        the menu from showing both 'Start Recording' and 'Record
+        <source> call' right after the user sees the unexpected stop."""
+        o, detector, _, _, _ = setup
+        detector.detect_result = {"source": "zoom", "url": None}
+        o.tick()
+        assert o.pending_prompt is not None
+        o.clear_prompt()
+        assert o.pending_prompt is None
+
+    def test_clear_prompt_with_no_prompt_is_noop(self, setup):
+        o, _, _, _, _ = setup
+        # Must not raise when called with nothing queued.
+        o.clear_prompt()
+        assert o.pending_prompt is None
+
+    def test_clear_prompt_does_not_block_redetection(self, setup):
+        """After a recovery-triggered clear, the next tick should be
+        free to re-surface the prompt if the call is still active —
+        clearing shouldn't mark the source as skipped/suppressed."""
+        o, detector, _, _, _ = setup
+        detector.detect_result = {"source": "zoom", "url": None}
+        o.tick()
+        o.clear_prompt()
+        o.tick()
+        assert o.pending_prompt == {"source": "zoom", "url": None}

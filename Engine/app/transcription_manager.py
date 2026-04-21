@@ -73,17 +73,38 @@ class TranscriptionManager:
         """Begin live transcription of ``wav_path`` as it grows on disk.
 
         Returns True on success, False if the realtime engine failed to
-        start (batch transcription is still usable in that case).
+        start (batch transcription is still usable in that case) OR if a
+        previous engine is still winding down. Refusing the second case
+        is load-bearing: two Python threads concurrently driving MLX
+        against the same GPU segfaults in ``Device::end_encoding`` (see
+        2026-04-21 crash report).
         """
+        with self._lock:
+            if self._realtime is not None:
+                if self._realtime.is_alive:
+                    logger.warning(
+                        "start_realtime() called while previous realtime "
+                        "engine is still alive — refusing to start a "
+                        "second concurrent transcriber. This recording "
+                        "will use batch transcription only."
+                    )
+                    return False
+                # Previous engine's thread has since exited (stop_realtime
+                # returned before it unwound, but it finished eventually).
+                # Safe to reclaim the slot.
+                self._realtime = None
+
         try:
             rt = get_realtime_engine()
             rt.start(wav_path)
-            self._realtime = rt
+            with self._lock:
+                self._realtime = rt
             logger.info("Realtime transcriber started")
             return True
         except Exception as e:  # noqa: BLE001
             logger.error("Failed to start realtime transcriber: %s", e, exc_info=True)
-            self._realtime = None
+            with self._lock:
+                self._realtime = None
             return False
 
     def stop_realtime(self) -> RealtimeResult:
@@ -95,9 +116,17 @@ class TranscriptionManager:
         pulled off the engine *before* the reference is cleared so that
         callers (menubar → submit()) can pass them to the pipeline for
         diarization alignment.
+
+        The engine reference is released only when the background thread
+        has actually exited. If ``stop()`` returns while the thread is
+        still alive (wedged on a long MLX synchronize, for example), we
+        keep ownership so the next ``start_realtime`` refuses rather
+        than spinning up a second transcriber that races against the
+        first.
         """
         if self._realtime is None:
             return RealtimeResult(text=None, sentences=[])
+        stop_raised = False
         try:
             text = self._realtime.stop()
             # accumulated_sentences is a RealtimeEngine-protocol member —
@@ -111,9 +140,20 @@ class TranscriptionManager:
             return RealtimeResult(text=text, sentences=sentences)
         except Exception as e:  # noqa: BLE001
             logger.error("Error stopping realtime transcriber: %s", e)
+            stop_raised = True
             return RealtimeResult(text=None, sentences=[])
         finally:
-            self._realtime = None
+            # Release the engine when it actually cleaned up (thread exited
+            # so its MLX state is unwound). If stop() returned while the
+            # thread is still alive we keep ownership — start_realtime
+            # will refuse rather than race a second transcriber against
+            # it. If stop() itself raised, the engine is in an unknown
+            # state and we clear the reference anyway (best-effort).
+            with self._lock:
+                if self._realtime is not None and (
+                    stop_raised or not self._realtime.is_alive
+                ):
+                    self._realtime = None
 
     @property
     def realtime_live_transcript_path(self) -> str | None:

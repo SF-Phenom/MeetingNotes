@@ -89,6 +89,19 @@ class RealtimeTranscriber:
         """True if a transcription cycle is currently running on the GPU."""
         return self._transcribing
 
+    @property
+    def is_alive(self) -> bool:
+        """True if the background polling thread is still running.
+
+        Distinct from :attr:`is_busy`: a thread can be alive but idle
+        between poll cycles. The manager uses this after ``stop()`` to
+        decide whether it's safe to release this instance — releasing
+        while the thread still holds MLX state lets a subsequent
+        ``start_realtime`` spin up a second transcriber that races
+        against the first and segfaults in MLX.
+        """
+        return self._thread is not None and self._thread.is_alive()
+
     def start(self, wav_path: str) -> None:
         """Begin polling the WAV file and transcribing in the background."""
         if self._thread and self._thread.is_alive():
@@ -115,19 +128,39 @@ class RealtimeTranscriber:
         self._thread.start()
         logger.info("Realtime transcriber started for %s", os.path.basename(wav_path))
 
-    def stop(self) -> str:
-        """Stop polling and return the accumulated transcript immediately.
+    # Upper bound on how long stop() will block waiting for the background
+    # thread to exit. A chunk transcription on a long recording can take
+    # 30+ seconds; the previous 2s timeout let stop() return while the
+    # thread was still mid-mx.stream() — nulling the GPU state out from
+    # under a live thread and then letting start_realtime spin up a
+    # second transcriber triggered a segfault in MLX (see 2026-04-21
+    # crash report). 30s covers a realistic chunk with headroom.
+    STOP_THREAD_JOIN_SECS = 30
 
-        Returns whatever text the background thread has produced so far
-        without blocking the main thread for a final transcription pass.
+    def stop(self) -> str:
+        """Stop polling and return the accumulated transcript.
+
+        Blocks up to :data:`STOP_THREAD_JOIN_SECS` for the background
+        thread to exit so the GPU has unwound before the caller starts
+        anything new. If the thread refuses to exit within that window
+        we leave ``_stream`` / ``_model`` in place (nulling them while
+        the thread is still using them segfaults MLX); the manager
+        checks :attr:`is_alive` afterward and keeps the reference, so a
+        subsequent ``start_realtime`` will refuse instead of racing.
         """
         self._stop_event.set()
 
-        # Give the background thread a brief moment to finish if it's
-        # between iterations, but don't block the UI waiting for a long
-        # transcription pass to complete.
         if self._thread:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=self.STOP_THREAD_JOIN_SECS)
+            if self._thread.is_alive():
+                logger.error(
+                    "Realtime transcriber thread did not exit within %ds; "
+                    "leaving MLX state intact to avoid a segfault. This "
+                    "instance stays owned by the manager until the thread "
+                    "finishes naturally.",
+                    self.STOP_THREAD_JOIN_SECS,
+                )
+                return self._full_text()
             self._thread = None
 
         # Clean up live transcript file
@@ -137,7 +170,7 @@ class RealtimeTranscriber:
             except OSError:
                 pass
 
-        # Release model and GPU stream
+        # Release model and GPU stream — only safe now that the thread exited.
         self._stream = None
         self._model = None
 

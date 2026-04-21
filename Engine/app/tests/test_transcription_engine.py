@@ -46,6 +46,8 @@ class _FakeRealtime:
     @property
     def is_busy(self) -> bool: return False
     @property
+    def is_alive(self) -> bool: return False
+    @property
     def live_transcript_path(self) -> str | None: return None
     @property
     def accumulated_sentences(self) -> list: return []

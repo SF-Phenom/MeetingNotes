@@ -74,6 +74,18 @@ class RealtimeEngine(Protocol):
         ...
 
     @property
+    def is_alive(self) -> bool:
+        """True if the background thread is still running after ``stop()``.
+
+        The manager consults this to decide whether it's safe to release
+        this engine instance. ``stop()`` blocks for a bounded window; if
+        the thread didn't unwind in time, the engine's GPU/state
+        references must NOT be reused — a second ``start_realtime``
+        started on a concurrent transcriber has segfaulted MLX.
+        """
+        ...
+
+    @property
     def live_transcript_path(self) -> str | None:
         """Path to a .live.txt file that updates during recording, or None."""
         ...

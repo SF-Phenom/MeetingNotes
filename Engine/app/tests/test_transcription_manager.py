@@ -18,7 +18,14 @@ from app.ui_bridge import UIBridge
 
 
 class _FakeRealtime:
-    """Mock RealtimeTranscriber — tracks start/stop + the returned text."""
+    """Mock RealtimeTranscriber — tracks start/stop + the returned text.
+
+    ``is_alive`` models the background thread: flips True on ``start``,
+    flips False on ``stop``. Tests that need to simulate a wedged
+    post-stop thread set ``alive_after_stop=True`` — the manager's
+    finally clause must keep the reference in that case so the next
+    ``start_realtime`` refuses.
+    """
 
     def __init__(self) -> None:
         self.started_path: str | None = None
@@ -28,18 +35,26 @@ class _FakeRealtime:
         self._sentences: list[Sentence] = []
         self.raise_on_start = False
         self.raise_on_stop = False
+        self._alive = False
+        self.alive_after_stop = False
 
     def start(self, wav_path: str) -> None:
         if self.raise_on_start:
             raise RuntimeError("boom-start")
         self.started_path = wav_path
         self.live_transcript_path = wav_path + ".live.txt"
+        self._alive = True
 
     def stop(self) -> str:
         self.stopped = True
         if self.raise_on_stop:
             raise RuntimeError("boom-stop")
+        self._alive = self.alive_after_stop
         return self._stop_return
+
+    @property
+    def is_alive(self) -> bool:
+        return self._alive
 
     @property
     def accumulated_sentences(self) -> list[Sentence]:
@@ -160,6 +175,81 @@ class TestRealtime:
         m.shutdown()
         assert fake_realtime_cls[0].stopped is True
         assert m.realtime_live_transcript_path is None
+
+    def test_second_start_refused_while_first_alive(
+        self, fake_realtime_cls, notify_log, rebuild_log,
+    ):
+        """Regression: the 2026-04-21 segfault chain started here.
+
+        User accepted a call prompt while the previous recording's
+        realtime engine was still winding down; the manager silently
+        overwrote ``_realtime`` with a second instance, and two MLX
+        eval threads racing on the GPU crashed in
+        ``Device::end_encoding``. The guard must refuse the second
+        start so at most one engine ever drives MLX.
+        """
+        _, notify = notify_log
+        _, rebuild = rebuild_log
+        m = TranscriptionManager(UIBridge(), rebuild, notify)
+        assert m.start_realtime("/tmp/a.wav") is True
+        # Previous engine is still "alive" (thread hasn't exited).
+        assert m.start_realtime("/tmp/b.wav") is False
+        # Only the first fake was constructed — the factory must not
+        # even be called for the refused start, since building the
+        # engine has its own cost.
+        assert len(fake_realtime_cls) == 1
+        assert fake_realtime_cls[0].started_path == "/tmp/a.wav"
+
+    def test_start_succeeds_after_clean_stop(
+        self, fake_realtime_cls, notify_log, rebuild_log,
+    ):
+        _, notify = notify_log
+        _, rebuild = rebuild_log
+        m = TranscriptionManager(UIBridge(), rebuild, notify)
+        m.start_realtime("/tmp/a.wav")
+        m.stop_realtime()  # fake flips is_alive False on clean stop
+        assert m.start_realtime("/tmp/b.wav") is True
+        assert len(fake_realtime_cls) == 2
+        assert fake_realtime_cls[1].started_path == "/tmp/b.wav"
+
+    def test_wedged_stop_keeps_ownership_blocking_new_start(
+        self, fake_realtime_cls, notify_log, rebuild_log,
+    ):
+        """If ``stop()`` returns while the background thread is still
+        alive (wedged on a long MLX synchronize), the manager must keep
+        the engine reference so the next ``start_realtime`` refuses. A
+        cleared reference would let a fresh engine spin up alongside
+        the wedged thread — the exact race that caused the crash.
+        """
+        _, notify = notify_log
+        _, rebuild = rebuild_log
+        m = TranscriptionManager(UIBridge(), rebuild, notify)
+        m.start_realtime("/tmp/a.wav")
+        # Simulate "stop timed out, thread still running."
+        fake_realtime_cls[0].alive_after_stop = True
+        m.stop_realtime()
+        # Ownership retained; a new start must refuse.
+        assert m.realtime_live_transcript_path == "/tmp/a.wav.live.txt"
+        assert m.start_realtime("/tmp/b.wav") is False
+
+    def test_wedged_stop_does_not_leak_after_thread_exits(
+        self, fake_realtime_cls, notify_log, rebuild_log,
+    ):
+        """The wedged-stop guard must not permanently wedge the manager:
+        once the lagging thread eventually exits (``is_alive`` flips
+        False), the next ``start_realtime`` reclaims the stale slot
+        and starts a fresh engine."""
+        _, notify = notify_log
+        _, rebuild = rebuild_log
+        m = TranscriptionManager(UIBridge(), rebuild, notify)
+        m.start_realtime("/tmp/a.wav")
+        fake_realtime_cls[0].alive_after_stop = True
+        m.stop_realtime()
+        # Lagging thread eventually finishes.
+        fake_realtime_cls[0]._alive = False
+        assert m.start_realtime("/tmp/b.wav") is True
+        assert len(fake_realtime_cls) == 2
+        assert fake_realtime_cls[1].started_path == "/tmp/b.wav"
 
 
 # ---------------------------------------------------------------------------
