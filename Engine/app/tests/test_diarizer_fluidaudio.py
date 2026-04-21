@@ -264,3 +264,61 @@ class TestDiarizerModelFlag:
         seen = self._capture_args(monkeypatch)
         FluidAudioDiarizer().diarize("/tmp/audio.wav", model="not-a-real-model")
         assert seen[0][seen[0].index("--model") + 1] == DEFAULT_MODEL
+
+
+class TestDiarizerSpeakerBounds:
+    """Passthrough tests for --min-speakers / --max-speakers CLI flags."""
+
+    def _capture_args(self, monkeypatch):
+        seen: list[list[str]] = []
+        def fake_run(cmd, capture_output, text, timeout):
+            seen.append(list(cmd))
+            out_idx = cmd.index("--output") + 1
+            with open(cmd[out_idx], "w") as f:
+                json.dump({"segments": []}, f)
+            return _make_completed()
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        return seen
+
+    def test_bounds_omitted_by_default(self, stub_binary, monkeypatch):
+        # Callers that don't know the speaker count must not force either
+        # bound — FluidAudio's community defaults stay in charge.
+        seen = self._capture_args(monkeypatch)
+        FluidAudioDiarizer().diarize("/tmp/audio.wav")
+        assert "--min-speakers" not in seen[0]
+        assert "--max-speakers" not in seen[0]
+
+    def test_min_speakers_forwarded(self, stub_binary, monkeypatch):
+        seen = self._capture_args(monkeypatch)
+        FluidAudioDiarizer().diarize("/tmp/audio.wav", min_speakers=2)
+        argv = seen[0]
+        assert argv[argv.index("--min-speakers") + 1] == "2"
+        assert "--max-speakers" not in argv
+
+    def test_max_speakers_forwarded(self, stub_binary, monkeypatch):
+        seen = self._capture_args(monkeypatch)
+        FluidAudioDiarizer().diarize("/tmp/audio.wav", max_speakers=5)
+        argv = seen[0]
+        assert argv[argv.index("--max-speakers") + 1] == "5"
+        assert "--min-speakers" not in argv
+
+    def test_both_bounds_forwarded(self, stub_binary, monkeypatch):
+        seen = self._capture_args(monkeypatch)
+        FluidAudioDiarizer().diarize(
+            "/tmp/audio.wav", model="community-1", min_speakers=2, max_speakers=8,
+        )
+        argv = seen[0]
+        assert argv[argv.index("--min-speakers") + 1] == "2"
+        assert argv[argv.index("--max-speakers") + 1] == "8"
+        assert argv[argv.index("--model") + 1] == "community-1"
+
+    def test_explicit_none_omits_flags(self, stub_binary, monkeypatch):
+        # Defensive: callers that pass None explicitly (e.g. pipeline when
+        # it has no count hint) get the same subprocess argv as callers who
+        # omit the kwargs entirely.
+        seen = self._capture_args(monkeypatch)
+        FluidAudioDiarizer().diarize(
+            "/tmp/audio.wav", min_speakers=None, max_speakers=None,
+        )
+        assert "--min-speakers" not in seen[0]
+        assert "--max-speakers" not in seen[0]

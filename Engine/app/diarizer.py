@@ -53,10 +53,21 @@ class Diarizer(Protocol):
     or ``"sortformer"`` for the FluidAudio backend). Implementations that
     don't understand the value — including the test double — silently
     ignore it.
+
+    ``min_speakers`` / ``max_speakers`` are optional bounds hints for the
+    underlying clusterer. Callers pass them when they have external
+    knowledge of how many people are in the meeting (calendar attendees,
+    observed participant count). Backends that can't use them — including
+    sortformer (architectural 4-track cap) and the test double — ignore
+    them silently.
     """
 
     def diarize(
-        self, wav_path: str, model: str | None = None,
+        self,
+        wav_path: str,
+        model: str | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
     ) -> list[SpeakerSegment] | None: ...
 
 
@@ -84,12 +95,16 @@ class FakeDiarizer:
         self._speakers = speakers
 
     def diarize(
-        self, wav_path: str, model: str | None = None,
+        self,
+        wav_path: str,
+        model: str | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
     ) -> list[SpeakerSegment]:
-        # ``model`` is accepted to conform to the Diarizer Protocol but has
-        # no meaning for the fake — we always produce the same alternating
-        # output regardless of which backend the caller asked for.
-        del model
+        # ``model`` / ``min_speakers`` / ``max_speakers`` are accepted to
+        # conform to the Diarizer Protocol but have no meaning for the fake —
+        # we always produce the same alternating output regardless.
+        del model, min_speakers, max_speakers
         try:
             with wave.open(wav_path, "rb") as w:
                 frames = w.getnframes()

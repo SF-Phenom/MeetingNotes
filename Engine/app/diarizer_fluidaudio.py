@@ -74,7 +74,11 @@ class FluidAudioDiarizer:
     """Runs :mod:`Engine/Diarize` as a subprocess and normalizes its output."""
 
     def diarize(
-        self, wav_path: str, model: str | None = None,
+        self,
+        wav_path: str,
+        model: str | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
     ) -> list[SpeakerSegment] | None:
         if not is_available():
             logger.warning(
@@ -90,15 +94,25 @@ class FluidAudioDiarizer:
         tmp_fd, output_path = tempfile.mkstemp(prefix="diarize_", suffix=".json")
         os.close(tmp_fd)
 
+        cmd = [
+            DIARIZE_BIN,
+            "--input", wav_path,
+            "--output", output_path,
+            "--model", resolved_model,
+        ]
+        # Only forward the bounds when the caller provided them. The Swift
+        # CLI treats absence as "use FluidAudio defaults"; passing explicit
+        # Nones would either require extra parsing over there or surface as
+        # a parse error. Keep the flag omitted by default.
+        if min_speakers is not None:
+            cmd += ["--min-speakers", str(min_speakers)]
+        if max_speakers is not None:
+            cmd += ["--max-speakers", str(max_speakers)]
+
         try:
             try:
                 proc = subprocess.run(
-                    [
-                        DIARIZE_BIN,
-                        "--input", wav_path,
-                        "--output", output_path,
-                        "--model", resolved_model,
-                    ],
+                    cmd,
                     capture_output=True,
                     text=True,
                     timeout=DIARIZE_TIMEOUT_SECS,
