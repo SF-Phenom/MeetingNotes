@@ -143,6 +143,50 @@ class TestTooShortRecording:
         assert "on_too_short callback raised" in caplog.text
 
 
+class TestDurationFromSentences:
+    """The realtime path used to hardcode duration_minutes=0, so every
+    transcript it produced showed `duration: 0 min` in the frontmatter.
+    This helper derives it from the last sentence's end timestamp, the
+    same way the batch engine does."""
+
+    def _sent(self, start: float, end: float):
+        from app.transcript_formatter import Sentence
+        return Sentence(start=start, end=end, text="x")
+
+    def test_empty_sentences_returns_zero(self):
+        from app.pipeline import _duration_minutes_from_sentences
+        assert _duration_minutes_from_sentences(None) == 0
+        assert _duration_minutes_from_sentences([]) == 0
+
+    def test_single_short_sentence_floors_to_one(self):
+        # Sub-minute recordings that cleared the too-short guard still
+        # deserve a nonzero duration; batch path does the same.
+        from app.pipeline import _duration_minutes_from_sentences
+        assert _duration_minutes_from_sentences([self._sent(0.0, 14.0)]) == 1
+
+    def test_multi_minute_recording(self):
+        # 27-min meeting (today's failing case) should read as 27.
+        from app.pipeline import _duration_minutes_from_sentences
+        sentences = [
+            self._sent(0.0, 60.0),
+            self._sent(60.0, 900.0),
+            self._sent(900.0, 1620.0),  # 27:00
+        ]
+        assert _duration_minutes_from_sentences(sentences) == 27
+
+    def test_uses_max_end_not_last(self):
+        # Sentences aren't guaranteed sorted on the accumulated list
+        # (chunk boundaries + the in-progress chunk are concatenated).
+        # Max is the defensible choice.
+        from app.pipeline import _duration_minutes_from_sentences
+        sentences = [
+            self._sent(100.0, 200.0),
+            self._sent(200.0, 320.0),
+            self._sent(0.0, 90.0),  # out-of-order leftover
+        ]
+        assert _duration_minutes_from_sentences(sentences) == 5
+
+
 class TestResolveBaseTitle:
     """Title priority: calendar > LLM > source fallback. The calendar-first
     flip is the whole point of this change — if summary.title wins over a

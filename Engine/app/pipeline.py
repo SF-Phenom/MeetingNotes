@@ -268,6 +268,21 @@ def _pick_diarizer(
     return (model, min_speakers, max_speakers)
 
 
+def _duration_minutes_from_sentences(sentences) -> int:
+    """Derive minute-rounded duration from the last sentence's end timestamp.
+
+    Mirrors the batch engine's convention (see ``transcriber.py`` —
+    ``max(1, round(last_end / 60))``) so realtime and batch paths produce
+    the same frontmatter shape for the same recording. Falls back to 0
+    only when no sentences are available at all; the empty-text guard
+    upstream already drops recordings that didn't produce any.
+    """
+    if not sentences:
+        return 0
+    last_end = max(s.end for s in sentences)
+    return max(1, round(last_end / 60))
+
+
 def _maybe_diarize(wav_path, transcription, metadata):
     """Run speaker diarization on ``transcription.sentences`` when enabled.
 
@@ -569,7 +584,7 @@ def process_recording(
         transcription = TranscriptionResult(
             plain_text=pre_transcribed_text,
             timestamped_text=pre_transcribed_text,
-            duration_minutes=0,
+            duration_minutes=_duration_minutes_from_sentences(pre_transcribed_sentences),
             srt_path="",
             # Carry realtime-produced sentences through so the diarization
             # step can align speaker labels without a second WAV read.
