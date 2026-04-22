@@ -12,11 +12,12 @@ BASE_DIR="${MEETINGNOTES_HOME:-$HOME/MeetingNotes}"
 ENGINE_DIR="$BASE_DIR/Engine"
 CAPTURE_BINARY="$ENGINE_DIR/.bin/capture-audio"
 DIARIZE_BINARY="$ENGINE_DIR/.bin/meetingnotes-diarize"
+ZOOM_OBSERVER_BINARY="$ENGINE_DIR/.bin/zoom-observer"
 VENV_DIR="$ENGINE_DIR/.venv"
 REPO_URL="https://github.com/SF-Phenom/MeetingNotes.git"
-SCRIPT_VERSION="3"
+SCRIPT_VERSION="4"
 CURRENT_STEP=0
-TOTAL_STEPS=14
+TOTAL_STEPS=15
 
 # -- Colors ---------------------------------------------------
 RED='\033[0;31m'
@@ -414,9 +415,71 @@ else
 fi
 
 # ============================================================
-# STEP 8: Directory Structure
+# STEP 8: Swift Zoom Accessibility Observer (experimental)
 # ============================================================
-step 8 "Directory structure"
+#
+# Shipped even when ax_participants_enabled is False in state.json —
+# the binary itself is inert without the user flipping the flag, and
+# the flag-gated subprocess launch in recorder.py never invokes it.
+# Building here means the feature is one toggle + one Accessibility
+# grant away rather than "re-run setup first."
+step 8 "Swift Zoom observer binary (experimental)"
+
+need_zoom_observer_rebuild=false
+if [[ ! -x "$ZOOM_OBSERVER_BINARY" ]]; then
+    need_zoom_observer_rebuild=true
+else
+    # Rebuild when any source / Info.plist is newer than the binary —
+    # same strictness as the Diarize binary (iterative edits need to
+    # deploy on setup re-run).
+    for src in "$ENGINE_DIR/ZoomObserver/Package.swift" \
+               "$ENGINE_DIR/ZoomObserver/Sources/"**/*.swift(N) \
+               "$ENGINE_DIR/ZoomObserver/Resources/Info.plist"; do
+        if [[ -f "$src" && "$src" -nt "$ZOOM_OBSERVER_BINARY" ]]; then
+            info "ZoomObserver source newer than binary — rebuilding..."
+            need_zoom_observer_rebuild=true
+            break
+        fi
+    done
+fi
+
+if ! $need_zoom_observer_rebuild; then
+    already "zoom-observer binary"
+else
+    info "Building ZoomObserver (Swift + Accessibility)..."
+    # Build in /tmp to avoid cloud sync (Google Drive/iCloud) locking build files.
+    build_tmp=$(mktemp -d)
+    cd "$ENGINE_DIR/ZoomObserver"
+    if ! swift build -c release --scratch-path "$build_tmp" 2>&1 | tail -5; then
+        warn "ZoomObserver build failed — participant-count observer will be unavailable."
+        warn "Zoom recordings will still work, just without the AX-observed count."
+        rm -rf "$build_tmp"
+        cd "$BASE_DIR"
+    else
+        if [[ ! -f "$build_tmp/release/ZoomObserver" ]]; then
+            warn "ZoomObserver build completed but binary not found — skipping."
+            rm -rf "$build_tmp"
+            cd "$BASE_DIR"
+        else
+            mkdir -p "$ENGINE_DIR/.bin"
+            cp "$build_tmp/release/ZoomObserver" "$ZOOM_OBSERVER_BINARY"
+            rm -rf "$build_tmp"
+            # Ad-hoc codesign so the embedded Info.plist becomes bound —
+            # TCC reads NSAccessibilityUsageDescription off our binary
+            # instead of walking up to the parent process. Mirrors the
+            # capture-audio codesign pattern.
+            codesign -s - --force "$ZOOM_OBSERVER_BINARY" >/dev/null 2>&1 || \
+                warn "Ad-hoc codesign of zoom-observer failed; Accessibility prompt may attribute to Terminal"
+            cd "$BASE_DIR"
+            success "zoom-observer built and installed"
+        fi
+    fi
+fi
+
+# ============================================================
+# STEP 9: Directory Structure
+# ============================================================
+step 9 "Directory structure"
 
 mkdir -p "$ENGINE_DIR/recordings/active"
 mkdir -p "$ENGINE_DIR/recordings/queue"
@@ -429,9 +492,9 @@ mkdir -p "$ENGINE_DIR/.credentials"
 success "Directories ready"
 
 # ============================================================
-# STEP 9: state.json
+# STEP 10: state.json
 # ============================================================
-step 9 "state.json"
+step 10 "state.json"
 
 if [[ -f "$ENGINE_DIR/state.json" ]]; then
     already "state.json"
@@ -452,9 +515,9 @@ EOF
 fi
 
 # ============================================================
-# STEP 10: Anthropic API Key
+# STEP 11: Anthropic API Key
 # ============================================================
-step 10 "Anthropic API key"
+step 11 "Anthropic API key"
 
 api_key_set=false
 
@@ -503,9 +566,9 @@ else
 fi
 
 # ============================================================
-# STEP 11: Obsidian
+# STEP 12: Obsidian
 # ============================================================
-step 11 "Obsidian (transcript viewer)"
+step 12 "Obsidian (transcript viewer)"
 
 if [[ -d "/Applications/Obsidian.app" ]] || brew list --cask obsidian &>/dev/null 2>&1; then
     already "Obsidian"
@@ -525,9 +588,9 @@ else
 fi
 
 # ============================================================
-# STEP 12: Ollama (local AI for summaries)
+# STEP 13: Ollama (local AI for summaries)
 # ============================================================
-step 12 "Ollama (local AI for summaries)"
+step 13 "Ollama (local AI for summaries)"
 
 if command -v ollama &>/dev/null || [[ -d "/Applications/Ollama.app" ]]; then
     already "Ollama"
@@ -564,9 +627,9 @@ else
 fi
 
 # ============================================================
-# STEP 13: Google Calendar (Optional)
+# STEP 14: Google Calendar (Optional)
 # ============================================================
-step 13 "Google Calendar integration (optional)"
+step 14 "Google Calendar integration (optional)"
 
 # Seed the OAuth client JSON from the repo-tracked default if the user
 # doesn't already have one. Shipping a shared installed-app OAuth client
@@ -665,6 +728,7 @@ check "Python venv"             "test -f $VENV_DIR/bin/python"
 check "Python packages"         "$VENV_DIR/bin/python -c 'import rumps, psutil, anthropic'"
 check "capture-audio"           "test -x $CAPTURE_BINARY"
 check "meetingnotes-diarize"    "test -x $DIARIZE_BINARY"
+check "zoom-observer"           "test -x $ZOOM_OBSERVER_BINARY"
 check "Ollama"                  "command -v ollama"
 check "Qwen model"             "ollama list 2>/dev/null | grep -q qwen3:4b"
 check "Obsidian"                "test -d /Applications/Obsidian.app"

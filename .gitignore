@@ -7,6 +7,9 @@ Engine/SpeechTranscribe/.swiftpm/
 Engine/Diarize/.build/
 Engine/Diarize/.swiftpm/
 Engine/Diarize/Package.resolved
+Engine/ZoomObserver/.build/
+Engine/ZoomObserver/.swiftpm/
+Engine/ZoomObserver/Package.resolved
 
 # Recordings (large binary files, ephemeral)
 Engine/recordings/active/*.wav

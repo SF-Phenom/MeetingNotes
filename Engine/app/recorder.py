@@ -20,6 +20,7 @@ import threading
 from datetime import datetime
 
 from . import state as state_mod
+from . import zoom_observer
 from .environment import ACTIVE_DIR, CAPTURE_AUDIO_BIN, QUEUE_DIR
 from .recording_file import RecordingFile
 
@@ -31,7 +32,13 @@ LOCK_FILE = os.path.join(ACTIVE_DIR, ".lock")
 # denied" from the check-audio-capture subcommand.
 AUDIO_CAPTURE_PERMISSION_DENIED = 10
 
+# Source string that gates whether the Zoom AX observer runs alongside
+# capture-audio. Matched case-insensitively against the source passed
+# into start_recording.
+_ZOOM_SOURCE_TOKEN = "zoom"
+
 _process: subprocess.Popen | None = None
+_observer_proc: subprocess.Popen | None = None
 
 
 def _ensure_dirs() -> None:
@@ -191,6 +198,14 @@ def start_recording(source: str) -> str:
 
     threading.Thread(target=_drain_stderr, args=(_process,), daemon=True).start()
 
+    # Launch the Zoom AX observer only for Zoom calls, only when the user
+    # opted in, and only when the binary is installed. start_observer()
+    # handles all three gates internally and returns None on any of them.
+    global _observer_proc
+    _observer_proc = None
+    if source.lower() == _ZOOM_SOURCE_TOKEN:
+        _observer_proc = zoom_observer.start_observer(recording_path)
+
     logger.info("Recording started (pid=%d) for source '%s'", _process.pid, source)
     return recording_path
 
@@ -260,8 +275,16 @@ def stop_recording() -> str | None:
     except OSError as e:
         logger.warning("Could not remove .lock file: %s", e)
 
-    # Move .wav + every sidecar (.meta.json, etc.) to the queue dir
-    # as one atomic-looking unit.
+    # Stop the Zoom AX observer (if it was running) BEFORE moving the
+    # wav to queue/. The observer's .participants.jsonl sidecar lives in
+    # active/ alongside the wav; it needs to be finalized and closed so
+    # RecordingFile.move_to picks it up as a well-formed file.
+    global _observer_proc
+    zoom_observer.stop_observer(_observer_proc)
+    _observer_proc = None
+
+    # Move .wav + every sidecar (.meta.json, .participants.jsonl, etc.)
+    # to the queue dir as one atomic-looking unit.
     queue_path: str | None = None
     if os.path.exists(active_path):
         try:
@@ -369,10 +392,12 @@ def check_orphaned_recording() -> None:
     On startup, check for a .lock file without a live process.
 
     If found, logs a warning and moves any orphaned .wav files from
-    recordings/active/ to recordings/queue/.
+    recordings/active/ to recordings/queue/. Also sweeps up a stranded
+    zoom-observer lockfile if one was left behind by the same crash.
     """
     _ensure_dirs()
     _kill_stray_capture_processes()
+    zoom_observer.recover_orphan()
 
     if not os.path.exists(LOCK_FILE):
         return
