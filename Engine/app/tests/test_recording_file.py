@@ -55,6 +55,17 @@ class TestExistingFiles:
         # Order: wav, then sidecars in SIDECAR_EXTENSIONS order
         assert found == [rf.wav_path, rf.metadata_path, rf.srt_path]
 
+    def test_includes_participants_jsonl_sidecar(self, recording, tmp_path):
+        # ZoomObserver writes this during Zoom recordings when the AX flag
+        # is on. It must propagate through the aggregate just like .meta.json.
+        rf = recording(sidecars=(".meta.json", ".participants.jsonl"))
+        found = rf.existing_files()
+        assert str(tmp_path / "zoom_2026-01-01_10-00.participants.jsonl") in found
+        # Sidecars still sorted by SIDECAR_EXTENSIONS order (.meta.json first).
+        assert found.index(rf.metadata_path) < found.index(
+            str(tmp_path / "zoom_2026-01-01_10-00.participants.jsonl")
+        )
+
     def test_missing_wav_omitted(self, tmp_path):
         # Sidecar exists but main .wav doesn't — should omit the wav.
         base = tmp_path / "alone"
@@ -136,3 +147,23 @@ class TestMoveTo:
             "zoom_2026-01-01_10-00.meta.json",
             "zoom_2026-01-01_10-00.wav",
         ]
+
+    def test_moves_participants_jsonl_sidecar(self, recording, tmp_path):
+        # active → queue transition must carry the ZoomObserver's JSONL
+        # alongside the wav so the pipeline can consume it post-recording.
+        rf = recording(sidecars=(".participants.jsonl",))
+        dest = tmp_path / "queue"
+        rf.move_to(str(dest))
+        names = sorted(p.name for p in dest.iterdir())
+        assert names == [
+            "zoom_2026-01-01_10-00.participants.jsonl",
+            "zoom_2026-01-01_10-00.wav",
+        ]
+
+
+class TestDeleteParticipantsJsonl:
+    def test_delete_counts_all_sidecars(self, recording):
+        rf = recording(sidecars=(".meta.json", ".srt", ".participants.jsonl"))
+        # 1 wav + 3 sidecars = 4 files removed.
+        assert rf.delete() == 4
+        assert rf.existing_files() == []

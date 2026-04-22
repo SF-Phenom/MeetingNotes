@@ -63,6 +63,15 @@ class State:
     # MEETINGNOTES_DIARIZATION env var until the feature is ready for a
     # visible toggle.
     diarization_enabled: bool = False
+    # Experimental Zoom AX-observed participant count toggle. When True
+    # AND the current recording source is "zoom", the ZoomObserver
+    # binary runs alongside capture-audio and writes a .participants.jsonl
+    # sidecar. The batch pipeline reads peak observed count to tighten
+    # the diarizer's max-speakers bound. Defaults off; requires the user
+    # to grant Accessibility permission to the zoom-observer binary.
+    # Flipped via direct state.json edit or MEETINGNOTES_AX_PARTICIPANTS
+    # env var until the feature is ready for a visible toggle.
+    ax_participants_enabled: bool = False
 
     @classmethod
     def from_raw(cls, raw: dict) -> "State":
@@ -95,6 +104,7 @@ DEFAULT_STATE = {
     "exporter_backend": "disabled",
     "apple_reminders_list": "MeetingNotes",
     "diarization_enabled": False,
+    "ax_participants_enabled": False,
 }
 
 

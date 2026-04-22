@@ -87,6 +87,13 @@ SPEECH_TRANSCRIBE_BIN = os.path.join(
 # missing, the pipeline runs without speaker labels.
 DIARIZE_BIN = os.path.join(BIN_DIR, "meetingnotes-diarize")
 
+# Zoom Accessibility observer (built from Engine/ZoomObserver).
+# Optional — only launched when ax_participants_enabled is True AND the
+# current recording source is "zoom". When missing, recording proceeds
+# without the .participants.jsonl sidecar and the pipeline falls back
+# to calendar-derived speaker bounds.
+ZOOM_OBSERVER_BIN = os.path.join(BIN_DIR, "zoom-observer")
+
 
 # --- Model expectations ------------------------------------------------------
 

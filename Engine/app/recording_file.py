@@ -28,7 +28,16 @@ logger = logging.getLogger(__name__)
 
 
 # Extensions that sit alongside the main .wav. Order matters only for logging.
-SIDECAR_EXTENSIONS: tuple[str, ...] = (".meta.json", ".srt")
+#
+# ``.participants.jsonl`` — one JSON record per participant-count poll from
+# the ZoomObserver (Engine/ZoomObserver), written incrementally during
+# recording. Absent when the observer isn't running (non-Zoom sources, or
+# Zoom with the AX opt-in flag off).
+SIDECAR_EXTENSIONS: tuple[str, ...] = (
+    ".meta.json",
+    ".srt",
+    ".participants.jsonl",
+)
 
 
 class RecordingFile:
