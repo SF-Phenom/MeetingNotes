@@ -126,6 +126,12 @@ DIARIZATION_ENABLED_ENV_VAR = "MEETINGNOTES_DIARIZATION"
 # to community-1.
 _SORTFORMER_MAX_PARTICIPANTS = 6
 
+# Headroom we add to the observed / scheduled participant count when
+# setting the diarizer's max-speakers ceiling. FluidAudio treats the
+# ceiling as a hard cap on cluster count; +2 absorbs the common cases
+# of an off-calendar attendee joining or a background voice leaking in.
+_MAX_SPEAKERS_HEADROOM = 2
+
 
 def _diarization_enabled() -> bool:
     """Resolve the diarization flag: env var override > state.json > default."""
@@ -144,29 +150,122 @@ def _diarization_enabled() -> bool:
         return False
 
 
-def _pick_diarizer_model(metadata: dict) -> str:
-    """Pick between FluidAudio's community-1 and sortformer backends.
+def _read_participants_sidecar(wav_path: str) -> int | None:
+    """Return the peak participant count observed by the Zoom AX observer.
 
-    Sortformer is the default; community-1 only takes over when the
-    calendar tells us the meeting is large (>6 total attendees).
-    Rationale: ad-hoc recordings with no matching calendar event are
-    typically 1:1s, standups, or small syncs, so sortformer's better
-    DER is the right bet. Large unscheduled gatherings exist but are
-    rare, and the cluster-bundling degradation is the same one we
-    already tolerate for scheduled >4-speaker meetings routed to
-    sortformer under the headcount rule above.
+    Reads ``<base>.participants.jsonl`` alongside the wav. Returns
+    ``None`` when the sidecar is missing, empty, malformed, or contains
+    only ``count: null`` records (the "observer ran but never saw the
+    panel" case). A partial trailing line — possible if the observer
+    was SIGKILLed mid-write — is tolerated by JSONL's line-at-a-time
+    parse: the last incomplete record is skipped.
 
-    ``metadata["participants"]`` is a ", "-joined display-name string of
-    OTHER attendees — the user is filtered out upstream by
-    ``calendar_lookup``, so we add 1 to the count to get total headcount.
+    Callers treat ``None`` as "AX signal unavailable, fall back to
+    calendar" — NOT as "zero participants". The observer explicitly
+    writes ``count: null`` when the panel isn't visible so a well-formed
+    sidecar with null-only records ends up here the same way a missing
+    file does, which is the policy we want.
     """
+    if wav_path.endswith(".wav"):
+        base = wav_path[:-4]
+    else:
+        base = os.path.splitext(wav_path)[0]
+    sidecar_path = base + ".participants.jsonl"
+
+    try:
+        with open(sidecar_path, "r", encoding="utf-8") as f:
+            raw_lines = f.readlines()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        logger.warning("Could not read participants sidecar %s: %s", sidecar_path, e)
+        return None
+
+    peak: int | None = None
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            # Last line may be partial if the observer was SIGKILLed —
+            # tolerate and keep the peak we've seen so far.
+            continue
+        value = record.get("count")
+        if isinstance(value, int) and value > 0:
+            peak = value if peak is None else max(peak, value)
+    return peak
+
+
+def _pick_diarizer(
+    metadata: dict, wav_path: str,
+) -> tuple[str, int | None, int | None]:
+    """Pick diarizer model + optional speaker-count bounds.
+
+    Returns ``(model, min_speakers, max_speakers)`` — any of which may
+    be ``None`` to mean "use FluidAudio's default". Policy:
+
+    * Prefer AX-observed participant count (from
+      ``<base>.participants.jsonl``) over calendar attendees. The AX
+      observer sees who actually joined; the calendar is speculative.
+    * When AX is unavailable, fall back to calendar headcount
+      (``metadata["participants"]`` — a ", "-joined display-name string
+      of OTHER attendees; the user is filtered out upstream, so we add
+      1 to get total headcount).
+    * When neither is available, return ``("sortformer", None, None)``
+      — today's ad-hoc default. Small meetings benefit more from
+      sortformer's DER than from community-1's speaker-count flexibility.
+
+    Bounds derivation: ``max_speakers = effective_count + 2`` (headroom
+    for off-calendar attendees / leaks). ``min_speakers = 2`` only when
+    we're confident there are ≥2 speakers — AX can legitimately observe
+    1 (user alone in the Zoom, waiting), in which case forcing
+    ``min_speakers=2`` would split a single voice into two clusters.
+
+    Model routing still follows the ≤6 / >6 split; community-1's speaker
+    bounds feed its clusterer directly, sortformer ignores them
+    architecturally (stderr-warns in the Swift CLI).
+    """
+    ax_peak = _read_participants_sidecar(wav_path)
+
+    cal_total: int | None = None
     participants = metadata.get("participants")
     if isinstance(participants, str) and participants.strip():
         n_others = len([p for p in participants.split(",") if p.strip()])
-        total = n_others + 1  # +1 for the user
-        if total > _SORTFORMER_MAX_PARTICIPANTS:
-            return "community-1"
-    return "sortformer"
+        cal_total = n_others + 1  # +1 for the user
+
+    # AX takes precedence when present. If absent (missing sidecar or
+    # null-only records), use calendar. If neither, no hint.
+    if ax_peak is not None:
+        effective_count = ax_peak
+        signal_source = "AX"
+    elif cal_total is not None:
+        effective_count = cal_total
+        signal_source = "calendar"
+    else:
+        effective_count = None
+        signal_source = None
+
+    if effective_count is None:
+        return ("sortformer", None, None)
+
+    max_speakers = effective_count + _MAX_SPEAKERS_HEADROOM
+    # Only set a floor when we have evidence of multiple speakers —
+    # single-participant observations are legitimate (user alone in a
+    # meeting) and should not force a split.
+    min_speakers = 2 if effective_count >= 2 else None
+
+    if effective_count > _SORTFORMER_MAX_PARTICIPANTS:
+        model = "community-1"
+    else:
+        model = "sortformer"
+
+    logger.debug(
+        "Diarizer pick: model=%s, bounds=(%s, %s), effective_count=%d via %s",
+        model, min_speakers, max_speakers, effective_count, signal_source,
+    )
+    return (model, min_speakers, max_speakers)
 
 
 def _maybe_diarize(wav_path, transcription, metadata):
@@ -199,12 +298,17 @@ def _maybe_diarize(wav_path, transcription, metadata):
             )
             return transcription
 
-        model = _pick_diarizer_model(metadata)
+        model, min_speakers, max_speakers = _pick_diarizer(metadata, wav_path)
         logger.info(
-            "Running diarizer (model=%s) on %s",
-            model, os.path.basename(wav_path),
+            "Running diarizer (model=%s, min=%s, max=%s) on %s",
+            model, min_speakers, max_speakers, os.path.basename(wav_path),
         )
-        segments = diarizer.diarize(wav_path, model=model)
+        segments = diarizer.diarize(
+            wav_path,
+            model=model,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
         if not segments:
             logger.info(
                 "Diarizer returned no segments for %s.",

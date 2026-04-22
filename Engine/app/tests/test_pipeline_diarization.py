@@ -9,13 +9,17 @@ none covered this path, which is exactly why the bug shipped.
 """
 from __future__ import annotations
 
+import json
+import os
+
 import pytest
 
 from app import pipeline
 from app.pipeline import (
     DIARIZATION_ENABLED_ENV_VAR,
     _maybe_diarize,
-    _pick_diarizer_model,
+    _pick_diarizer,
+    _read_participants_sidecar,
 )
 from app.speaker_alignment import SpeakerSegment
 from app.transcript_formatter import Sentence
@@ -23,48 +27,221 @@ from app.transcriber import TranscriptionResult
 
 
 # ---------------------------------------------------------------------------
-# _pick_diarizer_model — routing decision on metadata
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-class TestPickDiarizerModel:
-    def test_no_participants_defaults_to_sortformer(self):
-        # Ad-hoc recording with no calendar match: assume small meeting.
-        assert _pick_diarizer_model({}) == "sortformer"
+def _wav_path_for(tmp_path, name: str = "zoom_2026-04-22_10-00.wav") -> str:
+    """Return a path inside tmp_path. The file need not exist — _pick_diarizer
+    only uses the path to derive the sidecar name."""
+    return str(tmp_path / name)
 
-    def test_empty_participants_string_defaults_to_sortformer(self):
-        assert _pick_diarizer_model({"participants": ""}) == "sortformer"
-        assert _pick_diarizer_model({"participants": "   "}) == "sortformer"
 
-    def test_non_string_participants_defaults_to_sortformer(self):
+def _write_sidecar(tmp_path, wav_path: str, records: list[dict]) -> None:
+    """Write a .participants.jsonl sidecar next to `wav_path`."""
+    base = wav_path[:-4] if wav_path.endswith(".wav") else os.path.splitext(wav_path)[0]
+    sidecar = base + ".participants.jsonl"
+    with open(sidecar, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# _read_participants_sidecar — JSONL parsing
+# ---------------------------------------------------------------------------
+
+
+class TestReadParticipantsSidecar:
+    def test_missing_sidecar_returns_none(self, tmp_path):
+        assert _read_participants_sidecar(_wav_path_for(tmp_path)) is None
+
+    def test_empty_file_returns_none(self, tmp_path):
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [])
+        assert _read_participants_sidecar(wav) is None
+
+    def test_all_null_counts_returns_none(self, tmp_path):
+        # Observer ran, panel never opened — well-formed file but no
+        # usable signal. Must return None, not 0, so the pipeline falls
+        # back to calendar rather than treating it as "zero people".
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": None, "reason": "panel_closed", "observer_version": 1},
+            {"t": 10.0, "count": None, "reason": "panel_closed", "observer_version": 1},
+        ])
+        assert _read_participants_sidecar(wav) is None
+
+    def test_peak_of_mixed_records(self, tmp_path):
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": 2, "observer_version": 1},
+            {"t": 10.0, "count": 4, "observer_version": 1},
+            {"t": 20.0, "count": None, "reason": "panel_closed", "observer_version": 1},
+            {"t": 30.0, "count": 3, "observer_version": 1},
+        ])
+        assert _read_participants_sidecar(wav) == 4
+
+    def test_tolerates_partial_trailing_line(self, tmp_path):
+        # SIGKILLed observer may leave the last line unclosed. The
+        # truncated record itself is lost (no way to recover a valid
+        # count from malformed JSON), but the parser must NOT raise —
+        # earlier valid records still drive the peak.
+        wav = _wav_path_for(tmp_path)
+        base = wav[:-4]
+        with open(base + ".participants.jsonl", "w") as f:
+            f.write('{"t": 0.0, "count": 3, "observer_version": 1}\n')
+            f.write('{"t": 10.0, "count": 5, "obs')  # truncated — skipped
+        assert _read_participants_sidecar(wav) == 3
+
+    def test_ignores_zero_counts(self, tmp_path):
+        # Defensive: observer should never emit count: 0 (that's always
+        # null instead), but if it ever did, we'd treat it as no signal.
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": 0, "observer_version": 1},
+        ])
+        assert _read_participants_sidecar(wav) is None
+
+    def test_non_wav_path_also_works(self, tmp_path):
+        # Edge case — base path gets derived by stripping trailing
+        # extension, not strictly .wav. This matches RecordingFile's
+        # tolerance for non-.wav inputs.
+        path = str(tmp_path / "recording.audio")
+        base = os.path.splitext(path)[0]
+        with open(base + ".participants.jsonl", "w") as f:
+            f.write('{"t": 0.0, "count": 2, "observer_version": 1}\n')
+        assert _read_participants_sidecar(path) == 2
+
+
+# ---------------------------------------------------------------------------
+# _pick_diarizer — model + bounds derivation
+# ---------------------------------------------------------------------------
+
+
+class TestPickDiarizerCalendarOnly:
+    """Legacy calendar-only path — AX sidecar absent everywhere."""
+
+    def test_no_participants_defaults_to_sortformer_no_bounds(self, tmp_path):
+        # Ad-hoc recording with no calendar match AND no AX observer:
+        # sortformer, no hints.
+        assert _pick_diarizer({}, _wav_path_for(tmp_path)) == ("sortformer", None, None)
+
+    def test_empty_participants_string(self, tmp_path):
+        assert _pick_diarizer(
+            {"participants": ""}, _wav_path_for(tmp_path),
+        ) == ("sortformer", None, None)
+        assert _pick_diarizer(
+            {"participants": "   "}, _wav_path_for(tmp_path),
+        ) == ("sortformer", None, None)
+
+    def test_non_string_participants(self, tmp_path):
         # Defensive — metadata might carry a list or None from some edge path.
-        assert _pick_diarizer_model({"participants": None}) == "sortformer"
-        assert _pick_diarizer_model({"participants": ["Alice"]}) == "sortformer"
+        assert _pick_diarizer(
+            {"participants": None}, _wav_path_for(tmp_path),
+        ) == ("sortformer", None, None)
+        assert _pick_diarizer(
+            {"participants": ["Alice"]}, _wav_path_for(tmp_path),
+        ) == ("sortformer", None, None)
 
-    def test_single_other_attendee_picks_sortformer(self):
-        # 1 other + user = 2 total → sortformer (≤6).
-        assert _pick_diarizer_model({"participants": "Alice"}) == "sortformer"
+    def test_single_other_attendee_picks_sortformer_with_bounds(self, tmp_path):
+        # 1 other + user = 2 total → sortformer, min=2, max=4.
+        assert _pick_diarizer(
+            {"participants": "Alice"}, _wav_path_for(tmp_path),
+        ) == ("sortformer", 2, 4)
 
-    def test_six_total_still_picks_sortformer(self):
+    def test_six_total_still_picks_sortformer(self, tmp_path):
         # 5 others + user = 6 → right at the boundary, still sortformer.
-        assert _pick_diarizer_model(
-            {"participants": "A, B, C, D, E"}
-        ) == "sortformer"
+        assert _pick_diarizer(
+            {"participants": "A, B, C, D, E"}, _wav_path_for(tmp_path),
+        ) == ("sortformer", 2, 8)
 
-    def test_seven_total_falls_back_to_community_1(self):
-        # 6 others + user = 7 → over the Sortformer cap.
-        assert _pick_diarizer_model(
-            {"participants": "A, B, C, D, E, F"}
-        ) == "community-1"
+    def test_seven_total_falls_back_to_community_1(self, tmp_path):
+        # 6 others + user = 7 → over the Sortformer cap → community-1.
+        assert _pick_diarizer(
+            {"participants": "A, B, C, D, E, F"}, _wav_path_for(tmp_path),
+        ) == ("community-1", 2, 9)
 
-    def test_large_meeting_is_community_1(self):
+    def test_large_meeting_is_community_1(self, tmp_path):
         many = ", ".join(f"Person{i}" for i in range(20))
-        assert _pick_diarizer_model({"participants": many}) == "community-1"
+        model, min_, max_ = _pick_diarizer(
+            {"participants": many}, _wav_path_for(tmp_path),
+        )
+        assert model == "community-1"
+        assert min_ == 2
+        assert max_ == 23  # 20 others + user + 2 headroom
 
-    def test_stray_whitespace_and_empty_slots_ignored(self):
-        # Should still produce a meaningful count with defensive parsing.
-        hints = _pick_diarizer_model({"participants": " Alice ,  , Bob ,"})
-        assert hints == "sortformer"  # 2 real + user = 3
+    def test_stray_whitespace_and_empty_slots_ignored(self, tmp_path):
+        # Defensive parsing — stray commas and whitespace don't inflate
+        # the count. 2 real names + user = 3 total.
+        assert _pick_diarizer(
+            {"participants": " Alice ,  , Bob ,"}, _wav_path_for(tmp_path),
+        ) == ("sortformer", 2, 5)
+
+
+class TestPickDiarizerAXOverride:
+    """AX sidecar takes precedence over calendar when present."""
+
+    def test_ax_peak_overrides_calendar(self, tmp_path):
+        # Calendar says 3 total (2 others + user). AX saw 8 people
+        # actually show up → AX peak wins, routing crosses into
+        # community-1 territory.
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": 3, "observer_version": 1},
+            {"t": 10.0, "count": 8, "observer_version": 1},
+            {"t": 20.0, "count": 6, "observer_version": 1},
+        ])
+        model, min_, max_ = _pick_diarizer({"participants": "Alice, Bob"}, wav)
+        assert model == "community-1"  # 8 > 6
+        assert min_ == 2
+        assert max_ == 10  # 8 + 2
+
+    def test_ax_lower_than_calendar_also_wins(self, tmp_path):
+        # Calendar says 10 people were invited. Only 3 actually joined.
+        # AX signal wins, routes to sortformer with a tight ceiling.
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": 3, "observer_version": 1},
+        ])
+        many = ", ".join(f"P{i}" for i in range(9))  # 9 others + user = 10
+        model, min_, max_ = _pick_diarizer({"participants": many}, wav)
+        assert model == "sortformer"
+        assert min_ == 2
+        assert max_ == 5
+
+    def test_ax_single_participant_omits_min_bound(self, tmp_path):
+        # User alone in the Zoom (waiting, testing, whatever). AX
+        # reports 1. max=3 gives headroom but min must stay None so
+        # FluidAudio doesn't force a split of one voice into two.
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": 1, "observer_version": 1},
+        ])
+        model, min_, max_ = _pick_diarizer({}, wav)
+        assert model == "sortformer"
+        assert min_ is None
+        assert max_ == 3
+
+
+class TestPickDiarizerAXAbsentFallback:
+    """When AX produces no usable signal, calendar takes over."""
+
+    def test_null_only_sidecar_falls_back_to_calendar(self, tmp_path):
+        # Observer ran, panel never opened. Same behavior as if no
+        # sidecar existed: use calendar.
+        wav = _wav_path_for(tmp_path)
+        _write_sidecar(tmp_path, wav, [
+            {"t": 0.0, "count": None, "reason": "panel_closed", "observer_version": 1},
+            {"t": 10.0, "count": None, "reason": "panel_closed", "observer_version": 1},
+        ])
+        assert _pick_diarizer(
+            {"participants": "A, B, C, D, E, F"}, wav,
+        ) == ("community-1", 2, 9)
+
+    def test_no_ax_no_calendar_returns_no_hint(self, tmp_path):
+        # Ad-hoc recording with neither signal: today's sortformer default
+        # and no bounds hint — lets FluidAudio run on its own.
+        assert _pick_diarizer({}, _wav_path_for(tmp_path)) == ("sortformer", None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -87,10 +264,20 @@ class _RecordingDiarizer:
     """Capture diarize() calls + return scripted segments."""
     def __init__(self, segments: list[SpeakerSegment] | None):
         self._segments = segments
-        self.calls: list[tuple[str, str | None]] = []
+        # (wav_path, model, min_speakers, max_speakers) — mirrors the
+        # full Diarizer Protocol signature post-Commit-0 bounds wiring.
+        self.calls: list[
+            tuple[str, str | None, int | None, int | None]
+        ] = []
 
-    def diarize(self, wav_path: str, model: str | None = None):
-        self.calls.append((wav_path, model))
+    def diarize(
+        self,
+        wav_path: str,
+        model: str | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ):
+        self.calls.append((wav_path, model, min_speakers, max_speakers))
         return self._segments
 
 
@@ -174,8 +361,9 @@ class TestMaybeDiarize:
         # Sentences list on the result now carries the speaker labels.
         assert all(s.speaker is not None for s in out.sentences)
         # Subprocess called exactly once. Empty metadata = no calendar
-        # match → sortformer (the ad-hoc default).
-        assert diarizer.calls == [("/tmp/x.wav", "sortformer")]
+        # match → sortformer (the ad-hoc default). No AX sidecar either
+        # (the path doesn't exist), so bounds are None/None.
+        assert diarizer.calls == [("/tmp/x.wav", "sortformer", None, None)]
 
     def test_routes_sortformer_for_small_meeting(
         self, diarization_on, monkeypatch,
@@ -187,7 +375,8 @@ class TestMaybeDiarize:
         result = _make_result([Sentence(0.0, 5.0, "hi")])
         # 2 others + user = 3 ≤ 6 → sortformer.
         _maybe_diarize("/tmp/x.wav", result, {"participants": "Alice, Bob"})
-        assert diarizer.calls[0][1] == "sortformer"
+        # 2 others + user = 3 → sortformer, min=2, max=5.
+        assert diarizer.calls[0][1:] == ("sortformer", 2, 5)
 
     def test_routes_community_1_for_large_meeting(
         self, diarization_on, monkeypatch,
@@ -202,7 +391,8 @@ class TestMaybeDiarize:
             "/tmp/x.wav", result,
             {"participants": "A, B, C, D, E, F"},
         )
-        assert diarizer.calls[0][1] == "community-1"
+        # 6 others + user = 7 → community-1, min=2, max=9.
+        assert diarizer.calls[0][1:] == ("community-1", 2, 9)
 
     def test_empty_segments_return_input_unchanged(
         self, diarization_on, monkeypatch,
@@ -213,6 +403,29 @@ class TestMaybeDiarize:
         result = _make_result([Sentence(0.0, 5.0, "hi")])
         out = _maybe_diarize("/tmp/x.wav", result, {})
         assert out is result
+
+    def test_ax_sidecar_flows_bounds_into_diarizer_call(
+        self, diarization_on, monkeypatch, tmp_path,
+    ):
+        # End-to-end wiring: sidecar next to the wav → _maybe_diarize
+        # picks up bounds → diarizer receives min/max kwargs. Covers the
+        # gap between the _pick_diarizer unit tests and the diarizer
+        # subprocess passthrough tests in test_diarizer_fluidaudio.py.
+        wav = tmp_path / "zoom_2026-04-22_10-00.wav"
+        wav.write_bytes(b"")  # empty placeholder — diarizer is mocked
+        _write_sidecar(tmp_path, str(wav), [
+            {"t": 0.0, "count": 4, "observer_version": 1},
+            {"t": 10.0, "count": 7, "observer_version": 1},
+        ])
+        diarizer = _RecordingDiarizer([
+            SpeakerSegment(0.0, 5.0, "Speaker A"),
+        ])
+        monkeypatch.setattr("app.diarizer.get_diarizer", lambda: diarizer)
+        result = _make_result([Sentence(0.0, 5.0, "hi")])
+        # Calendar says 3 total. AX peaked at 7 → AX wins, routes
+        # community-1 with max=9.
+        _maybe_diarize(str(wav), result, {"participants": "Alice, Bob"})
+        assert diarizer.calls[0] == (str(wav), "community-1", 2, 9)
 
     def test_preserves_non_text_fields(self, diarization_on, monkeypatch):
         # duration_minutes + srt_path should survive a speakered rebuild
@@ -278,8 +491,8 @@ class TestRealtimeShortcutPathDiarizes:
 
         out = _maybe_diarize("/tmp/fake.wav", result, {"participants": "Alice, Bob"})
 
-        # Diarization actually ran.
-        assert diarizer.calls == [("/tmp/fake.wav", "sortformer")]
+        # Diarization actually ran. 2 others + user = 3 → sortformer, (2, 5).
+        assert diarizer.calls == [("/tmp/fake.wav", "sortformer", 2, 5)]
         # Both speaker labels show up in the rendered text — THIS is the
         # assertion that would have failed before commit ef50c73.
         assert "**Speaker A:**" in out.plain_text
