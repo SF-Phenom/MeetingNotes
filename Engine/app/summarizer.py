@@ -320,6 +320,12 @@ def _summarize_ollama(
     payload = json.dumps({
         "model": model,
         "stream": False,
+        # Force the daemon to constrain output to a valid JSON object.
+        # Without this, qwen3 occasionally returns markdown-styled key/value
+        # pairs ("**title**: ..."), which _extract_json's greedy fallback
+        # regex then matches against an inner action-item object — producing
+        # a "parse succeeded, all fields empty" silent failure.
+        "format": "json",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -355,9 +361,24 @@ def _summarize_ollama(
             logger.info("Ollama responded in %.1fs", elapsed)
 
             parsed = _extract_json(raw_text)
+            # Guard against "parsed successfully but the dict isn't ours":
+            # if the model emitted markdown-wrapped output, _extract_json's
+            # greedy regex may have grabbed an inner action-item object
+            # (keys: item/owner/due) and every .get(...) below would silently
+            # fall through to its default. Require the two fields that every
+            # real summary must have; treat anything else as a parse failure
+            # so the retry loop runs.
+            title = parsed.get("title")
+            summary = parsed.get("summary")
+            if not isinstance(title, str) or not title.strip() \
+                    or not isinstance(summary, str) or not summary.strip():
+                raise ValueError(
+                    f"Ollama returned malformed summary object "
+                    f"(keys={sorted(parsed.keys())})"
+                )
             return SummaryResult(
-                title=parsed.get("title", "Untitled Meeting"),
-                summary=parsed.get("summary", ""),
+                title=title,
+                summary=summary,
                 action_items=parsed.get("action_items", []),
                 projects_mentioned=parsed.get("projects_mentioned", []),
                 key_decisions=parsed.get("key_decisions", []),
@@ -365,7 +386,7 @@ def _summarize_ollama(
                 model_used="ollama:" + model,
             )
 
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.error("Failed to parse Ollama response as JSON: %s", e)
             logger.debug("Raw Ollama response: %s", raw_text[:1000] if raw_text else "(empty)")
             last_error = e

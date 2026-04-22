@@ -246,3 +246,117 @@ class TestSummarizeFallback:
         )
         result = summarizer.summarize("text", "context", {})
         assert result.fell_back is False
+
+
+class TestSummarizeOllama:
+    """Guards against the 2026-04-22 silent-empty-summary failure mode.
+
+    Root cause: qwen3 occasionally emits markdown-styled output ("**title**:
+    ...") instead of a JSON object. _extract_json's greedy fallback regex
+    then matches an inner action-item object and every .get() below returned
+    its default. The pipeline wrote a transcript with "Untitled Meeting"
+    and every section blank, with no error surfaced.
+    """
+
+    def _mock_urlopen(self, monkeypatch, responses):
+        """Patch urllib.request.urlopen to return a queue of Ollama replies.
+
+        Each response is a string the daemon would put in message.content.
+        Also captures the request payload(s) for assertion.
+        """
+        import io
+        import json as _json
+        import urllib.request
+
+        captured: list[dict] = []
+        queue = list(responses)
+
+        class _FakeResp:
+            def __init__(self, payload: bytes):
+                self._buf = io.BytesIO(payload)
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return self._buf.read()
+
+        def fake_urlopen(req, timeout=None):
+            captured.append(_json.loads(req.data.decode()))
+            if not queue:
+                raise AssertionError("urlopen called more times than mocked responses")
+            content = queue.pop(0)
+            body = _json.dumps({"message": {"content": content}}).encode()
+            return _FakeResp(body)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        # Don't waste wall-clock on retry backoff during tests.
+        monkeypatch.setattr(summarizer.time, "sleep", lambda *_a, **_k: None)
+        return captured
+
+    def test_payload_forces_json_format(self, monkeypatch):
+        """Prevents regression on the real fix: Ollama must be told to
+        constrain output to JSON, or qwen3 will sometimes emit markdown."""
+        captured = self._mock_urlopen(
+            monkeypatch,
+            ['{"title": "T", "summary": "S", "action_items": [], '
+             '"projects_mentioned": [], "key_decisions": []}'],
+        )
+        summarizer._summarize_ollama("transcript text", "context md", {})
+        assert captured, "urlopen should have been invoked"
+        assert captured[0].get("format") == "json", (
+            f"Ollama payload must request format=json; got {captured[0]!r}"
+        )
+
+    def test_markdown_output_triggers_retry(self, monkeypatch):
+        """The real-world failure: qwen3 emits markdown. _extract_json's
+        greedy regex grabs an inner action-item dict ({'item','owner','due'})
+        — it parses, but has no 'title' / 'summary'. Must retry, not
+        silently return an empty SummaryResult."""
+        markdown_response = (
+            "### Response\n"
+            "**title**: Skills Gap Report Planning\n"
+            "**summary**: The team discussed the report.\n"
+            "**action_items**: [\n"
+            '  {"item": "Prepare report", "owner": "Ethan", "due": "Wed"}\n'
+            "]\n"
+        )
+        good_response = (
+            '{"title": "Skills Gap Report Planning", '
+            '"summary": "The team discussed the report.", '
+            '"action_items": [], "projects_mentioned": [], "key_decisions": []}'
+        )
+        captured = self._mock_urlopen(
+            monkeypatch, [markdown_response, good_response]
+        )
+        result = summarizer._summarize_ollama("transcript", "context", {})
+        assert len(captured) == 2, "first (markdown) attempt should retry"
+        assert result.title == "Skills Gap Report Planning"
+        assert result.summary == "The team discussed the report."
+
+    def test_all_attempts_malformed_raises(self, monkeypatch):
+        """If every retry returns unusable output, the function must raise
+        so the caller (summarize) can escalate — never return an empty
+        SummaryResult dressed up as a success."""
+        markdown = (
+            "**title**: x\n"
+            '**action_items**: [{"item": "a", "owner": "b", "due": "c"}]'
+        )
+        self._mock_urlopen(
+            monkeypatch, [markdown] * (1 + summarizer.MAX_RETRIES),
+        )
+        with pytest.raises(RuntimeError):
+            summarizer._summarize_ollama("transcript", "context", {})
+
+    def test_empty_title_treated_as_malformed(self, monkeypatch):
+        """Defensive: a present-but-blank title is as useless as a missing
+        one. Whitespace-only summary likewise."""
+        blank_title = (
+            '{"title": "   ", "summary": "A real summary.", '
+            '"action_items": [], "projects_mentioned": [], "key_decisions": []}'
+        )
+        good = (
+            '{"title": "Real Title", "summary": "A real summary.", '
+            '"action_items": [], "projects_mentioned": [], "key_decisions": []}'
+        )
+        captured = self._mock_urlopen(monkeypatch, [blank_title, good])
+        result = summarizer._summarize_ollama("transcript", "context", {})
+        assert len(captured) == 2
+        assert result.title == "Real Title"
