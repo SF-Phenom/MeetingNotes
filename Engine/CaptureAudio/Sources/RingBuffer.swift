@@ -14,12 +14,17 @@ import Foundation
 /// On overflow (producer outruns consumer) the oldest samples are dropped;
 /// `overflowCount` is bumped so callers can log it. In practice this should
 /// never fire — 30 s of headroom at 16 kHz is ~960 KB.
+///
+/// On underrun (consumer reads when empty) `underrunCount` is bumped. This
+/// is interesting for diagnosis: it tells us whether the drainer stalled
+/// because the producer stopped feeding this ring, versus some other path.
 final class RingBuffer: @unchecked Sendable {
     let capacity: Int
     private let storage: UnsafeMutableBufferPointer<Int16>
     private var writeIdx: Int = 0
     private var readIdx: Int = 0
     private var overflows: Int = 0
+    private var underruns: Int = 0
     private let lock = NSLock()
 
     init(capacity: Int) {
@@ -43,6 +48,11 @@ final class RingBuffer: @unchecked Sendable {
     var overflowCount: Int {
         lock.lock(); defer { lock.unlock() }
         return overflows
+    }
+
+    var underrunCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return underruns
     }
 
     /// Write `count` samples from `samples` into the ring. If there's not
@@ -90,7 +100,10 @@ final class RingBuffer: @unchecked Sendable {
 
         let available = writeIdx - readIdx
         let n = min(maxCount, available)
-        guard n > 0 else { return 0 }
+        guard n > 0 else {
+            underruns += 1
+            return 0
+        }
 
         let offset = readIdx % capacity
         let firstChunk = min(n, capacity - offset)

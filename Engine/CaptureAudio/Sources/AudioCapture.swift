@@ -49,9 +49,40 @@ final class AudioCaptureManager: @unchecked Sendable {
     )
 
     // Diagnostics
+    private var captureStartTime: CFAbsoluteTime = 0
     private var micFrames: Int = 0
+    private var micCallbacks: Int = 0
     private var tapFrames: Int = 0
     private var tapCallbacks: Int = 0
+
+    // Per-window peak + heartbeat state. Tap and mic are tracked in
+    // symmetric pairs so one log window can tell which of these is true:
+    // (1) callback thread stopped, (2) callbacks fire with zero buffers,
+    // (3) buffers arrive but converter zeroes them, (4) everything fine.
+    private var tapRawPeakWindow: Float = 0
+    private var tapOutPeakWindow: Int16 = 0
+    private var tapPeakLastLog: CFAbsoluteTime = 0
+    private var tapCallbacksAtLastLog: Int = 0
+    private var tapFramesAtLastLog: Int = 0
+    private var tapZeroStreak: Int = 0
+
+    private var micRawPeakWindow: Float = 0
+    private var micOutPeakWindow: Int16 = 0
+    private var micPeakLastLog: CFAbsoluteTime = 0
+    private var micCallbacksAtLastLog: Int = 0
+    private var micFramesAtLastLog: Int = 0
+    private var micZeroStreak: Int = 0
+
+    private static let peakLogIntervalSecs: CFAbsoluteTime = 5.0
+
+    // CoreAudio property listeners installed during capture. Stored so
+    // they can be removed in stop() with the same block reference.
+    private struct PropertyListener {
+        let objectID: AudioObjectID
+        let address: AudioObjectPropertyAddress
+        let block: AudioObjectPropertyListenerBlock
+    }
+    private var propertyListeners: [PropertyListener] = []
 
     init(mixedWriter: WAVWriter) {
         self.mixedWriter = mixedWriter
@@ -60,6 +91,7 @@ final class AudioCaptureManager: @unchecked Sendable {
     // MARK: - Lifecycle
 
     func start() throws {
+        captureStartTime = CFAbsoluteTimeGetCurrent()
         try startMicCapture()
         try startSystemAudioCapture()
         let drainer = MixerDrainer(mic: micRing, system: systemRing, writer: mixedWriter)
@@ -79,6 +111,14 @@ final class AudioCaptureManager: @unchecked Sendable {
         micEngine?.stop()
         micEngine = nil
         micConverter = nil
+
+        for listener in propertyListeners {
+            var addr = listener.address
+            _ = AudioObjectRemovePropertyListenerBlock(
+                listener.objectID, &addr, ioProcQueue, listener.block
+            )
+        }
+        propertyListeners.removeAll()
 
         if let procID = ioProcID, aggregateID != kAudioObjectUnknown {
             _ = AudioDeviceStop(aggregateID, procID)
@@ -173,6 +213,23 @@ final class AudioCaptureManager: @unchecked Sendable {
     }
 
     private func handleMicBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter) {
+        micCallbacks += 1
+
+        // Raw peak (pre-converter) across whatever float32 channels the
+        // mic hardware delivers. AVAudioEngine inputNode format is float
+        // on macOS; guard in case a future input path changes.
+        let inputFrames = Int(buffer.frameLength)
+        if let fc = buffer.floatChannelData {
+            let channels = Int(buffer.format.channelCount)
+            for c in 0..<channels {
+                let plane = fc[c]
+                for j in 0..<inputFrames {
+                    let mag = abs(plane[j])
+                    if mag > micRawPeakWindow { micRawPeakWindow = mag }
+                }
+            }
+        }
+
         let ratio = outputFormat.sampleRate / buffer.format.sampleRate
         let outCapacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 1
         guard let outBuffer = AVAudioPCMBuffer(
@@ -195,6 +252,53 @@ final class AudioCaptureManager: @unchecked Sendable {
 
         micRing.write(channelData[0], count: Int(outBuffer.frameLength))
         micFrames += Int(outBuffer.frameLength)
+
+        // Post-conversion peak — what actually reached the ring.
+        let outFrames = Int(outBuffer.frameLength)
+        for j in 0..<outFrames {
+            let s = channelData[0][j]
+            let mag: Int16 = (s == Int16.min) ? Int16.max : Swift.abs(s)
+            if mag > micOutPeakWindow { micOutPeakWindow = mag }
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if micPeakLastLog == 0 {
+            micPeakLastLog = now
+            micCallbacksAtLastLog = micCallbacks
+            micFramesAtLastLog = micFrames
+        } else if now - micPeakLastLog >= Self.peakLogIntervalSecs {
+            let cbDelta = micCallbacks - micCallbacksAtLastLog
+            let frDelta = micFrames - micFramesAtLastLog
+            let rawDb = micRawPeakWindow > 0
+                ? 20.0 * log10(Double(micRawPeakWindow)) : -.infinity
+            let outDb = micOutPeakWindow > 0
+                ? 20.0 * log10(Double(micOutPeakWindow) / 32767.0) : -.infinity
+            fputs(
+                "CaptureAudio: mic peak 5s window — raw="
+                + String(format: "%.5f", micRawPeakWindow)
+                + " (" + String(format: "%.1f", rawDb) + " dBFS)"
+                + "  out_int16=\(micOutPeakWindow)"
+                + " (" + String(format: "%.1f", outDb) + " dBFS)"
+                + "  callbacks=+\(cbDelta) frames=+\(frDelta)\n",
+                stderr
+            )
+            if micRawPeakWindow == 0 {
+                micZeroStreak += 1
+            } else {
+                if micZeroStreak >= 2 {
+                    fputs(
+                        "CaptureAudio: mic silence-streak ended after \(micZeroStreak) windows (~\(micZeroStreak * 5)s)\n",
+                        stderr
+                    )
+                }
+                micZeroStreak = 0
+            }
+            micRawPeakWindow = 0
+            micOutPeakWindow = 0
+            micPeakLastLog = now
+            micCallbacksAtLastLog = micCallbacks
+            micFramesAtLastLog = micFrames
+        }
     }
 
     // MARK: - Process Tap (system audio)
@@ -302,6 +406,59 @@ final class AudioCaptureManager: @unchecked Sendable {
                 + "\(srcIsNonInterleaved ? "planar" : "interleaved") float32)\n",
             stderr
         )
+
+        installDeviceChangeObservers(tapID: tap)
+    }
+
+    // MARK: - Device-change observability
+
+    // Install CoreAudio property listeners that log hardware/routing
+    // events during capture. Goal: correlate tap-silence transitions
+    // against things like Zoom VP-IO coming online, default-input device
+    // changes, or tap-format re-negotiation. Each listener writes one
+    // line to stderr when fired, tagged with the selector FourCC and an
+    // offset from capture start so it aligns with the 5 s peak windows.
+    private func installDeviceChangeObservers(tapID: AudioObjectID) {
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        let selectors: [(AudioObjectID, AudioObjectPropertySelector)] = [
+            (sys, kAudioHardwarePropertyDevices),
+            (sys, kAudioHardwarePropertyDefaultInputDevice),
+            (sys, kAudioHardwarePropertyDefaultOutputDevice),
+            (tapID, kAudioTapPropertyFormat),
+        ]
+        for (obj, sel) in selectors {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: sel,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            let selFourCC = fourCC(sel)
+            let targetObj = obj
+            let startTime = captureStartTime
+            let block: AudioObjectPropertyListenerBlock = { _, _ in
+                let now = CFAbsoluteTimeGetCurrent()
+                let offset = startTime > 0 ? now - startTime : 0
+                let mm = Int(offset) / 60
+                let ss = Int(offset) % 60
+                fputs(
+                    "CaptureAudio: hw event — selector='\(selFourCC)' on obj=\(targetObj)"
+                    + " at +\(String(format: "%02d:%02d", mm, ss))\n",
+                    stderr
+                )
+            }
+            let err = AudioObjectAddPropertyListenerBlock(obj, &addr, ioProcQueue, block)
+            if err == noErr {
+                propertyListeners.append(
+                    PropertyListener(objectID: obj, address: addr, block: block)
+                )
+            } else {
+                fputs(
+                    "CaptureAudio: failed to install listener selector='\(selFourCC)'"
+                    + " obj=\(obj) — \(fmtStatus(err))\n",
+                    stderr
+                )
+            }
+        }
     }
 
     private func handleTapBuffer(_ input: UnsafePointer<AudioBufferList>) {
@@ -323,6 +480,20 @@ final class AudioCaptureManager: @unchecked Sendable {
             frames = Int(firstBuf.mDataByteSize) / MemoryLayout<Float>.size
         }
         guard frames > 0 else { return }
+
+        // Raw-tap peak: scan incoming Float32 samples across every plane
+        // before the converter touches them. If this stays at 0 while
+        // frames keep arriving, the tap itself is delivering digital
+        // silence (the Zoom VP-IO / post-call-start pathology).
+        for i in 0..<abl.count {
+            let buf = abl[i]
+            guard let p = buf.mData?.assumingMemoryBound(to: Float.self) else { continue }
+            let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
+            for j in 0..<count {
+                let mag = abs(p[j])
+                if mag > tapRawPeakWindow { tapRawPeakWindow = mag }
+            }
+        }
 
         guard let srcBuffer = AVAudioPCMBuffer(
             pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(frames)
@@ -362,6 +533,55 @@ final class AudioCaptureManager: @unchecked Sendable {
 
         systemRing.write(channelData[0], count: Int(outBuffer.frameLength))
         tapFrames += Int(outBuffer.frameLength)
+
+        // Post-conversion peak: what actually reached the ring buffer
+        // after AVAudioConverter. Compared against tapRawPeakWindow this
+        // isolates a converter bug from a silent-tap bug.
+        let outFrames = Int(outBuffer.frameLength)
+        for j in 0..<outFrames {
+            let s = channelData[0][j]
+            let mag: Int16 = (s == Int16.min) ? Int16.max : Swift.abs(s)
+            if mag > tapOutPeakWindow { tapOutPeakWindow = mag }
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if tapPeakLastLog == 0 {
+            tapPeakLastLog = now
+            tapCallbacksAtLastLog = tapCallbacks
+            tapFramesAtLastLog = tapFrames
+        } else if now - tapPeakLastLog >= Self.peakLogIntervalSecs {
+            let cbDelta = tapCallbacks - tapCallbacksAtLastLog
+            let frDelta = tapFrames - tapFramesAtLastLog
+            let rawDb = tapRawPeakWindow > 0
+                ? 20.0 * log10(Double(tapRawPeakWindow)) : -.infinity
+            let outDb = tapOutPeakWindow > 0
+                ? 20.0 * log10(Double(tapOutPeakWindow) / 32767.0) : -.infinity
+            fputs(
+                "CaptureAudio: tap peak 5s window — raw="
+                + String(format: "%.5f", tapRawPeakWindow)
+                + " (" + String(format: "%.1f", rawDb) + " dBFS)"
+                + "  out_int16=\(tapOutPeakWindow)"
+                + " (" + String(format: "%.1f", outDb) + " dBFS)"
+                + "  callbacks=+\(cbDelta) frames=+\(frDelta)\n",
+                stderr
+            )
+            if tapRawPeakWindow == 0 {
+                tapZeroStreak += 1
+            } else {
+                if tapZeroStreak >= 2 {
+                    fputs(
+                        "CaptureAudio: tap silence-streak ended after \(tapZeroStreak) windows (~\(tapZeroStreak * 5)s)\n",
+                        stderr
+                    )
+                }
+                tapZeroStreak = 0
+            }
+            tapRawPeakWindow = 0
+            tapOutPeakWindow = 0
+            tapPeakLastLog = now
+            tapCallbacksAtLastLog = tapCallbacks
+            tapFramesAtLastLog = tapFrames
+        }
     }
 }
 
@@ -412,6 +632,22 @@ func readTapUID(_ tapID: AudioObjectID) -> String? {
     let err = AudioObjectGetPropertyData(tapID, &addr, 0, nil, &size, &uid)
     guard err == noErr, let u = uid?.takeRetainedValue() else { return nil }
     return u as String
+}
+
+/// Convert a FourCC UInt32 (e.g. kAudioHardwarePropertyDevices) to its 4-char
+/// string form, or a hex representation when the bytes aren't printable ASCII.
+func fourCC(_ v: UInt32) -> String {
+    let bytes: [UInt8] = [
+        UInt8((v >> 24) & 0xff),
+        UInt8((v >> 16) & 0xff),
+        UInt8((v >>  8) & 0xff),
+        UInt8( v        & 0xff),
+    ]
+    if bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7f }),
+       let s = String(bytes: bytes, encoding: .ascii) {
+        return s
+    }
+    return String(format: "0x%08x", v)
 }
 
 /// Format an OSStatus as `<dec> (0x<hex>) '<fourcc>'` when the bytes are printable.

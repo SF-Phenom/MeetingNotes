@@ -31,6 +31,18 @@ final class MixerDrainer: @unchecked Sendable {
     private let sysScratch: UnsafeMutableBufferPointer<Int16>
     private let outScratch: UnsafeMutableBufferPointer<Int16>
 
+    // 5 s heartbeat — sanity-checks that ticks are firing, that frames
+    // are being written, and surfaces ring underruns/overflows per
+    // window. Only touched from the drainer queue so no locking needed.
+    private var lastFillLog: CFAbsoluteTime = 0
+    private var ticksThisWindow: Int = 0
+    private var framesWrittenThisWindow: Int = 0
+    private var micOverflowsAtLastLog: Int = 0
+    private var sysOverflowsAtLastLog: Int = 0
+    private var micUnderrunsAtLastLog: Int = 0
+    private var sysUnderrunsAtLastLog: Int = 0
+    private static let fillLogIntervalSecs: CFAbsoluteTime = 5.0
+
     init(mic: RingBuffer, system: RingBuffer, writer: WAVWriter) {
         self.micRing = mic
         self.systemRing = system
@@ -82,25 +94,67 @@ final class MixerDrainer: @unchecked Sendable {
     }
 
     private func tick() {
+        ticksThisWindow += 1
+
         let pending = min(micRing.availableToRead, systemRing.availableToRead)
-        guard pending > 0 else { return }
-        let n = min(pending, chunkCapacity)
+        if pending > 0 {
+            let n = min(pending, chunkCapacity)
+            let micRead = micRing.read(into: micScratch.baseAddress!, maxCount: n)
+            let sysRead = systemRing.read(into: sysScratch.baseAddress!, maxCount: n)
+            let count = min(micRead, sysRead)
+            if count > 0 {
+                // Saturating add — keeps mixed samples in Int16 range without wrap.
+                for i in 0..<count {
+                    let mixed = Int32(micScratch[i]) + Int32(sysScratch[i])
+                    outScratch[i] = Int16(clamping: mixed)
+                }
 
-        let micRead = micRing.read(into: micScratch.baseAddress!, maxCount: n)
-        let sysRead = systemRing.read(into: sysScratch.baseAddress!, maxCount: n)
-        let count = min(micRead, sysRead)
-        guard count > 0 else { return }
-
-        // Saturating add — keeps mixed samples in Int16 range without wrap.
-        for i in 0..<count {
-            let mixed = Int32(micScratch[i]) + Int32(sysScratch[i])
-            outScratch[i] = Int16(clamping: mixed)
+                let data = Data(
+                    bytes: outScratch.baseAddress!,
+                    count: count * MemoryLayout<Int16>.size
+                )
+                writer.write(data)
+                framesWrittenThisWindow += count
+            }
         }
 
-        let data = Data(
-            bytes: outScratch.baseAddress!,
-            count: count * MemoryLayout<Int16>.size
+        emitHeartbeatIfDue()
+    }
+
+    private func emitHeartbeatIfDue() {
+        let now = CFAbsoluteTimeGetCurrent()
+        if lastFillLog == 0 {
+            lastFillLog = now
+            micOverflowsAtLastLog = micRing.overflowCount
+            sysOverflowsAtLastLog = systemRing.overflowCount
+            micUnderrunsAtLastLog = micRing.underrunCount
+            sysUnderrunsAtLastLog = systemRing.underrunCount
+            return
+        }
+        guard now - lastFillLog >= Self.fillLogIntervalSecs else { return }
+
+        let micFill = micRing.availableToRead
+        let sysFill = systemRing.availableToRead
+        let micOF = micRing.overflowCount
+        let sysOF = systemRing.overflowCount
+        let micUR = micRing.underrunCount
+        let sysUR = systemRing.underrunCount
+        fputs(
+            "MixerDrainer: fill mic=\(micFill) sys=\(sysFill)"
+            + " ticks=+\(ticksThisWindow)"
+            + " wrote=+\(framesWrittenThisWindow)"
+            + " underruns mic=\(micUR - micUnderrunsAtLastLog)"
+            + " sys=\(sysUR - sysUnderrunsAtLastLog)"
+            + " overflows mic=\(micOF - micOverflowsAtLastLog)"
+            + " sys=\(sysOF - sysOverflowsAtLastLog)\n",
+            stderr
         )
-        writer.write(data)
+        ticksThisWindow = 0
+        framesWrittenThisWindow = 0
+        micOverflowsAtLastLog = micOF
+        sysOverflowsAtLastLog = sysOF
+        micUnderrunsAtLastLog = micUR
+        sysUnderrunsAtLastLog = sysUR
+        lastFillLog = now
     }
 }
