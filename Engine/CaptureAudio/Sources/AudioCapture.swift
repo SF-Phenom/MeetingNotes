@@ -84,6 +84,22 @@ final class AudioCaptureManager: @unchecked Sendable {
     }
     private var propertyListeners: [PropertyListener] = []
 
+    // Tap self-heal: detect extended tap silence and rebuild the tap +
+    // aggregate + IOProc stack. Gated on recent mic activity so we don't
+    // churn during legitimate silence (quiet call, nobody talking).
+    // micLastAudibleTime is written from the mic thread and read from
+    // the ioProcQueue; CFAbsoluteTime (Double) is 8 bytes — read/write
+    // tears are harmless here since the value is only used to gate a
+    // diagnostic reinit.
+    private var micLastAudibleTime: CFAbsoluteTime = 0
+    private var reinitInFlight: Bool = false
+    private var lastReinitTime: CFAbsoluteTime = 0
+    private var reinitCount: Int = 0
+    private static let reinitSilenceThreshold: Int = 6         // 6 × 5 s = 30 s
+    private static let reinitCooldownSecs: CFAbsoluteTime = 30
+    private static let micActivityWindowSecs: CFAbsoluteTime = 15
+    private static let micActivityFloor: Float = 0.01           // ≈ −40 dBFS
+
     init(mixedWriter: WAVWriter) {
         self.mixedWriter = mixedWriter
     }
@@ -112,6 +128,27 @@ final class AudioCaptureManager: @unchecked Sendable {
         micEngine = nil
         micConverter = nil
 
+        // Wait for any in-flight reinit on ioProcQueue to finish before
+        // tearing the tap stack down — both paths destroy the same state.
+        ioProcQueue.sync { }
+        teardownSystemAudioStack()
+
+        fputs(
+            "CaptureAudio: mic=\(micFrames) frames, tap=\(tapFrames) frames / \(tapCallbacks) callbacks"
+            + " / \(reinitCount) tap-reinits\n",
+            stderr
+        )
+        let micOverflows = micRing.overflowCount
+        let sysOverflows = systemRing.overflowCount
+        if micOverflows > 0 || sysOverflows > 0 {
+            fputs(
+                "CaptureAudio: ring overflows — mic=\(micOverflows) sys=\(sysOverflows)\n",
+                stderr
+            )
+        }
+    }
+
+    private func teardownSystemAudioStack() {
         for listener in propertyListeners {
             var addr = listener.address
             _ = AudioObjectRemovePropertyListenerBlock(
@@ -134,19 +171,8 @@ final class AudioCaptureManager: @unchecked Sendable {
             _ = AudioHardwareDestroyProcessTap(tapID)
             tapID = kAudioObjectUnknown
         }
-
-        fputs(
-            "CaptureAudio: mic=\(micFrames) frames, tap=\(tapFrames) frames / \(tapCallbacks) callbacks\n",
-            stderr
-        )
-        let micOverflows = micRing.overflowCount
-        let sysOverflows = systemRing.overflowCount
-        if micOverflows > 0 || sysOverflows > 0 {
-            fputs(
-                "CaptureAudio: ring overflows — mic=\(micOverflows) sys=\(sysOverflows)\n",
-                stderr
-            )
-        }
+        tapSrcFormat = nil
+        tapConverter = nil
     }
 
     // MARK: - Mic capture
@@ -292,6 +318,9 @@ final class AudioCaptureManager: @unchecked Sendable {
                     )
                 }
                 micZeroStreak = 0
+            }
+            if micRawPeakWindow >= Self.micActivityFloor {
+                micLastAudibleTime = now
             }
             micRawPeakWindow = 0
             micOutPeakWindow = 0
@@ -581,7 +610,48 @@ final class AudioCaptureManager: @unchecked Sendable {
             tapPeakLastLog = now
             tapCallbacksAtLastLog = tapCallbacks
             tapFramesAtLastLog = tapFrames
+
+            maybeKickTapReinit(now: now)
         }
+    }
+
+    // Fire a tap-stack reinit when we've seen ≥ 30 s of digital silence
+    // AND the mic was audible within the last 15 s — that combination
+    // matches the Zoom VP-IO re-bind pathology where IOProc keeps firing
+    // but delivers zero buffers. Cooldown prevents thrashing.
+    private func maybeKickTapReinit(now: CFAbsoluteTime) {
+        guard tapZeroStreak >= Self.reinitSilenceThreshold else { return }
+        guard !reinitInFlight else { return }
+        if lastReinitTime > 0, now - lastReinitTime < Self.reinitCooldownSecs { return }
+        guard micLastAudibleTime > 0,
+              now - micLastAudibleTime <= Self.micActivityWindowSecs else { return }
+
+        let silenceSecs = tapZeroStreak * 5
+        let micAgeSecs = Int(now - micLastAudibleTime)
+        let reason = "tap silent \(silenceSecs)s, mic audible \(micAgeSecs)s ago"
+        reinitInFlight = true
+        ioProcQueue.async { [weak self] in
+            self?.reinitSystemTap(reason: reason)
+        }
+    }
+
+    // Runs on ioProcQueue so it's serialized with IOProc callbacks. Any
+    // callback that arrives mid-reinit sees nil tapSrcFormat/tapConverter
+    // (set by teardown) and returns at the guard in handleTapBuffer.
+    private func reinitSystemTap(reason: String) {
+        fputs("CaptureAudio: tap reinit begin — \(reason)\n", stderr)
+        teardownSystemAudioStack()
+        usleep(50_000)
+        do {
+            try startSystemAudioCapture()
+            reinitCount += 1
+            fputs("CaptureAudio: tap reinit ok (#\(reinitCount))\n", stderr)
+        } catch {
+            fputs("CaptureAudio: tap reinit FAILED — \(error)\n", stderr)
+        }
+        tapZeroStreak = 0
+        lastReinitTime = CFAbsoluteTimeGetCurrent()
+        reinitInFlight = false
     }
 }
 
