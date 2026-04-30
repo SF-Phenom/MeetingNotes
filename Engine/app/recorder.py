@@ -287,6 +287,12 @@ def stop_recording() -> str | None:
     # to the queue dir as one atomic-looking unit.
     queue_path: str | None = None
     if os.path.exists(active_path):
+        # Defense-in-depth: if capture-audio was SIGKILLed above (or
+        # crashed for any reason) the WAV header may not have been
+        # finalized. Patch it before the move so downstream consumers
+        # (FluidAudio diarizer, QuickLook, anything using ExtAudioFile)
+        # can read the file. Idempotent and a no-op on healthy headers.
+        _repair_truncated_wav_header(active_path)
         try:
             moved = RecordingFile(active_path).move_to(QUEUE_DIR)
             queue_path = moved.wav_path
