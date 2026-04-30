@@ -165,13 +165,17 @@ class MeetingNotesApp(rumps.App):
 
         self.menu.clear()
 
-        items = [
-            rumps.MenuItem("Start Recording", callback=self._manual_start),
-            None,  # separator
-        ]
+        items: list = []
 
         # Non-blocking call-detected prompt (replaces the old rumps.alert
-        # modal that froze the detection timer while shown).
+        # modal that froze the detection timer while shown). When a
+        # prompt is pending the contextual "Record <source> call" action
+        # replaces the generic "Start Recording" — they're mutually
+        # exclusive choices and showing both led users to click the
+        # wrong one (manual-tagged recording during a call misses the
+        # calendar enrichment + AX observer + auto-stop). To start a
+        # non-call recording while a prompt is up, click "Skip this
+        # call" first; the generic action reappears immediately.
         prompt = self._orchestrator.pending_prompt
         if prompt:
             src = prompt["source"]
@@ -187,6 +191,11 @@ class MeetingNotesApp(rumps.App):
                 "Never for {}".format(src),
                 callback=self._suppress_call_source,
             ))
+            items.append(None)
+        else:
+            items.append(
+                rumps.MenuItem("Start Recording", callback=self._manual_start)
+            )
             items.append(None)
 
         if self._transcription.is_transcribing:
@@ -482,11 +491,12 @@ class MeetingNotesApp(rumps.App):
         except Exception as e:  # noqa: BLE001
             logger.error("Error clearing recorder state during recovery: %s", e)
 
-        # Drop any call prompt that was queued while the prior recording
-        # was live — otherwise the idle menu would show both a generic
-        # "Start Recording" AND "Record <source> call" right after the
-        # unexpected stop, which is confusing in the exact moment the
-        # user is trying to figure out what just happened.
+        # Drop any call prompt left over from before the recording so
+        # the user gets a clean idle menu for one tick after the
+        # unexpected stop, instead of an immediate "Record <source>
+        # call" that obscures what just happened. The next 10 s
+        # detection tick will re-queue the prompt if the call is still
+        # active.
         try:
             self._orchestrator.clear_prompt()
         except Exception as e:  # noqa: BLE001
