@@ -100,8 +100,17 @@ final class AudioCaptureManager: @unchecked Sendable {
     private static let micActivityWindowSecs: CFAbsoluteTime = 15
     private static let micActivityFloor: Float = 0.01           // ≈ −40 dBFS
 
-    init(mixedWriter: WAVWriter) {
+    // Whether the tap self-heal reinit is allowed to fire. Off by
+    // default; main.swift turns it on only when the caller passes
+    // --source zoom, the one call type with a confirmed VP-IO
+    // re-bind pathology. Other recording sources (manual, meet,
+    // teams) hit normal silence often enough that the reinit churn
+    // outweighs its value.
+    private let tapReinitEnabled: Bool
+
+    init(mixedWriter: WAVWriter, tapReinitEnabled: Bool) {
         self.mixedWriter = mixedWriter
+        self.tapReinitEnabled = tapReinitEnabled
     }
 
     // MARK: - Lifecycle
@@ -631,6 +640,7 @@ final class AudioCaptureManager: @unchecked Sendable {
     // matches the Zoom VP-IO re-bind pathology where IOProc keeps firing
     // but delivers zero buffers. Cooldown prevents thrashing.
     private func maybeKickTapReinit(now: CFAbsoluteTime) {
+        guard tapReinitEnabled else { return }
         guard tapZeroStreak >= Self.reinitSilenceThreshold else { return }
         guard !reinitInFlight else { return }
         if lastReinitTime > 0, now - lastReinitTime < Self.reinitCooldownSecs { return }

@@ -7,7 +7,7 @@ import Foundation
 func usage() -> Never {
     fputs("""
         Usage:
-            CaptureAudio start --output /path/to/file.wav
+            CaptureAudio start --output /path/to/file.wav [--source <name>]
             CaptureAudio check-audio-capture
         \n
         """, stderr)
@@ -50,6 +50,16 @@ guard args.count >= 4,
 
 let outputPath = args[3]
 
+// Optional `--source <name>` flag. Used to gate the tap self-heal
+// reinit on call types known to suffer the VP-IO re-bind pathology
+// (currently Zoom only). Absent or unrecognised → reinit disabled,
+// which is also the safe default for ad-hoc binary use outside the
+// menubar.
+var captureSource: String = ""
+if args.count >= 6, args[4] == "--source" {
+    captureSource = args[5]
+}
+
 // MARK: - Paths
 
 let meetingNotesHome = ProcessInfo.processInfo.environment["MEETINGNOTES_HOME"]
@@ -84,7 +94,10 @@ do {
 
 // MARK: - Audio Capture
 
-let captureManager = AudioCaptureManager(mixedWriter: mixedWriter)
+let captureManager = AudioCaptureManager(
+    mixedWriter: mixedWriter,
+    tapReinitEnabled: captureSource.lowercased() == "zoom"
+)
 
 do {
     try captureManager.start()

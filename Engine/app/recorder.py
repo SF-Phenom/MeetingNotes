@@ -164,7 +164,7 @@ def start_recording(source: str) -> str:
 
     try:
         _process = subprocess.Popen(
-            [BINARY, "start", "--output", recording_path],
+            [BINARY, "start", "--output", recording_path, "--source", source],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
