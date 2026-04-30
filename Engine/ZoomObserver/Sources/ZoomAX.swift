@@ -41,6 +41,31 @@ enum ZoomAX {
         return matches.first?.processIdentifier
     }
 
+    // True when Zoom has a window whose title contains "meeting" — the
+    // load-bearing signal for "user is currently in a Zoom call". Zoom's
+    // home screen window is titled "Zoom Workplace" and is excluded by
+    // requiring "meeting" in the title; the in-call window is "Zoom
+    // Meeting"; and during screenshare the floating control bar still
+    // carries "Meeting" in its title. False positives on a "Schedule a
+    // Meeting" dialog are tolerable — they'd just delay an auto-stop.
+    static func isInMeeting(zoomPID: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(zoomPID)
+        guard let windows: [AXUIElement] = children(app, attr: kAXWindowsAttribute) else {
+            return false
+        }
+        for window in windows {
+            guard let title = attrString(
+                window, attr: kAXTitleAttribute as String
+            )?.lowercased() else {
+                continue
+            }
+            if title.contains("meeting") {
+                return true
+            }
+        }
+        return false
+    }
+
     // Walk the given Zoom process and return the participant count, or
     // nil when we couldn't locate the panel (closed, not open yet, or
     // Zoom UI shape changed). Emits the first-attach tree dump once per

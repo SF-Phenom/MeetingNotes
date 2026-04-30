@@ -18,11 +18,21 @@ Returns: {"source": str, "url": str|None} or None
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 
 import psutil
 
+from .environment import ZOOM_OBSERVER_BIN
+
 logger = logging.getLogger(__name__)
+
+# zoom-observer probe exit codes — must match ZoomObserver/Sources/main.swift.
+# 0 = in meeting, 11 = Zoom running but not in meeting, 12 = Zoom not running,
+# 10 = AX permission denied, anything else = unexpected failure.
+_ZOOM_PROBE_TIMEOUT_SECS = 5.0
+_ZOOM_PROBE_NOT_IN_MEETING = 11
+_ZOOM_PROBE_NOT_RUNNING = 12
 
 # ─── URL patterns (Strategy A) ────────────────────────────────────────────────
 
@@ -180,14 +190,14 @@ _SOURCE_TO_TITLE: dict[str, str] = {
 # Browser-based sources: the meeting runs inside Chrome
 _BROWSER_SOURCES = {"google-meet", "teams"}
 
-# Apps where window COUNT is a better "in meeting" signal than title.
-# Zoom stays open after meetings end (1 window = home screen) and during
-# screenshare the meeting window disappears entirely, replaced by a
-# floating control bar that doesn't contain "Meeting" in its title.
-# But window count stays >= 2 throughout the meeting regardless of
-# screenshare state.
-_WINDOW_COUNT_SOURCES = {"zoom"}
-_WINDOW_COUNT_THRESHOLD = 2  # in-meeting = this many windows or more
+# Sources that need an Accessibility-based liveness probe instead of
+# process-or-window-title heuristics. Zoom stays running after a meeting
+# ends (the home screen replaces the meeting window), and the previously-
+# tried window-count check false-stopped during screenshare. The AX
+# probe checks for an `AXWindow` whose title contains "Meeting" — present
+# throughout the call (including screenshare's floating control bar) and
+# absent on the home screen.
+_AX_PROBE_SOURCES = {"zoom"}
 
 
 def is_call_still_active(source: str) -> bool:
@@ -197,10 +207,10 @@ def is_call_still_active(source: str) -> bool:
     For browser-based sources (Google Meet, Teams): only checks if Chrome
     is running. Checking URLs is unreliable during screenshare/tab switching.
 
-    For Zoom: checks process is running AND window count >= 2. Window titles
-    are unreliable because screensharing replaces the meeting window with a
-    floating control bar. Window count stays >= 2 throughout a meeting and
-    drops back to 1 (home screen) when the meeting ends.
+    For Zoom: checks process is running AND the zoom-observer AX probe
+    confirms a Meeting window is open. Falls back conservatively (still
+    active) on any probe failure so a missing binary or denied AX grant
+    can't trigger a false auto-stop mid-meeting.
 
     For other native apps (Slack, Webex, FaceTime): checks process AND
     window title keyword.
@@ -216,19 +226,46 @@ def is_call_still_active(source: str) -> bool:
     if not _process_running(proc_name):
         return False
 
-    # Process is running — for window-count sources (Zoom), that's enough.
-    # The window-count >= 2 heuristic is unreliable on current Zoom versions:
-    # the count can drop to 1 mid-meeting (e.g. when sharing screen the
-    # main window is replaced by a floating control bar), causing false
-    # auto-stops. Zoom's process exits when the user leaves the meeting,
-    # so process-alive is the load-bearing signal.
-    if source in _WINDOW_COUNT_SOURCES:
-        return True
+    if source in _AX_PROBE_SOURCES:
+        return _zoom_in_meeting()
 
     title_keyword = _SOURCE_TO_TITLE.get(source)
     if title_keyword:
         return _has_meeting_window(proc_name, title_keyword)
 
+    return True
+
+
+def _zoom_in_meeting() -> bool:
+    """Run the zoom-observer probe; True when Zoom has a Meeting window.
+
+    Conservative on every failure mode: missing binary, AX denied,
+    timeout, unexpected exit code → True. Only an explicit "not in
+    meeting" (11) or "Zoom not running" (12) returns False. Per the
+    project's overall posture, missing an auto-stop is recoverable
+    (user clicks stop manually); a false stop mid-meeting truncates
+    the recording and is much worse.
+    """
+    if not os.path.isfile(ZOOM_OBSERVER_BIN) or not os.access(
+        ZOOM_OBSERVER_BIN, os.X_OK
+    ):
+        return True
+    try:
+        result = subprocess.run(
+            [ZOOM_OBSERVER_BIN, "probe"],
+            capture_output=True,
+            timeout=_ZOOM_PROBE_TIMEOUT_SECS,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("Zoom probe failed (%s); assuming still in meeting.", e)
+        return True
+    if result.returncode == 0:
+        return True
+    if result.returncode in (_ZOOM_PROBE_NOT_IN_MEETING, _ZOOM_PROBE_NOT_RUNNING):
+        return False
+    logger.debug(
+        "Zoom probe exited %d; assuming still in meeting.", result.returncode
+    )
     return True
 
 

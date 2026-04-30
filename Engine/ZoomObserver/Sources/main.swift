@@ -21,6 +21,13 @@ import Foundation
 // "degrade silently, never break audio capture" posture.
 
 let PERMISSION_DENIED_EXIT_CODE: Int32 = 10
+// Probe subcommand exit codes. The Python caller (call_detector.py)
+// distinguishes "Zoom is in a meeting" (0) from "Zoom is running but
+// not in a meeting" (11) and "Zoom is not running" (12). Any other
+// non-zero result is treated conservatively as "still in meeting" so
+// a probe failure never triggers a false auto-stop.
+let PROBE_NOT_IN_MEETING_EXIT_CODE: Int32 = 11
+let PROBE_ZOOM_NOT_RUNNING_EXIT_CODE: Int32 = 12
 let OBSERVER_VERSION = 1
 
 // MARK: - Arg parsing ----------------------------------------------------
@@ -30,6 +37,7 @@ func usage() -> Never {
     Usage:
         zoom-observer start --output /path/to/recording.participants.jsonl [--interval-seconds 10]
         zoom-observer check-accessibility
+        zoom-observer probe
     """
     FileHandle.standardError.write(Data((msg + "\n").utf8))
     exit(1)
@@ -48,6 +56,23 @@ if args[1] == "check-accessibility" {
     let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
     let trusted = AXIsProcessTrustedWithOptions(options)
     exit(trusted ? 0 : PERMISSION_DENIED_EXIT_CODE)
+}
+
+// MARK: - probe subcommand --------------------------------------------
+
+// One-shot AX query for "is Zoom currently in a meeting?". Called from
+// call_detector.is_call_still_active to drive auto-stop. Silent on AX
+// (no prompt) so a missing grant doesn't pop a dialog mid-poll. Process
+// is short-lived; cold-start latency is dominated by binary load (~50 ms).
+if args[1] == "probe" {
+    let silentOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary
+    if !AXIsProcessTrustedWithOptions(silentOptions) {
+        exit(PERMISSION_DENIED_EXIT_CODE)
+    }
+    guard let pid = ZoomAX.zoomProcessID() else {
+        exit(PROBE_ZOOM_NOT_RUNNING_EXIT_CODE)
+    }
+    exit(ZoomAX.isInMeeting(zoomPID: pid) ? 0 : PROBE_NOT_IN_MEETING_EXIT_CODE)
 }
 
 guard args[1] == "start" else { usage() }
