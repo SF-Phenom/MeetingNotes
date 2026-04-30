@@ -115,8 +115,14 @@ final class AudioCaptureManager: @unchecked Sendable {
         self.drainer = drainer
     }
 
-    func stop() {
-        // Drain first — flushes anything still in the rings into the WAV.
+    // Stop accepting new samples and drain the rings into the WAV
+    // writer. Fast and non-blocking; touches no CoreAudio handles. The
+    // shutdown sequence calls this first so that mixedWriter.finalize()
+    // can patch the header before teardownAudio() — which can stall
+    // indefinitely in CoreAudio Process Tap destruction when a tap
+    // reinit is in flight — runs. If teardownAudio() then hangs and the
+    // recorder SIGKILLs us, the WAV on disk is already valid.
+    func flush() {
         drainer?.stop()
         drainer = nil
 
@@ -127,9 +133,14 @@ final class AudioCaptureManager: @unchecked Sendable {
         micEngine?.stop()
         micEngine = nil
         micConverter = nil
+    }
 
-        // Wait for any in-flight reinit on ioProcQueue to finish before
-        // tearing the tap stack down — both paths destroy the same state.
+    // Tear down the Process Tap + aggregate + IOProc stack. May block:
+    // ioProcQueue.sync waits for any in-flight reinit, and the CoreAudio
+    // destroy calls themselves can stall when the tap or aggregate has
+    // pending property-listener invocations. Must only be called after
+    // flush() + WAV finalize, since a stall here can result in SIGKILL.
+    func teardownAudio() {
         ioProcQueue.sync { }
         teardownSystemAudioStack()
 

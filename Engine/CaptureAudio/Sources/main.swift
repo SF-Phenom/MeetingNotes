@@ -97,13 +97,25 @@ do {
 // MARK: - Signal Handling
 
 func shutdown() {
-    captureManager.stop()
+    // Drain rings into the WAV writer and finalize the header BEFORE
+    // touching CoreAudio teardown. teardownAudio() can stall in
+    // AudioHardwareDestroyProcessTap / aggregate-device destruction
+    // when a tap reinit is in flight, and the recorder will SIGKILL us
+    // after ~8 s. Finalizing first means the WAV on disk is already
+    // valid even if we never reach the bottom of this function.
+    captureManager.flush()
     do {
         try mixedWriter.finalize()
     } catch {
         fputs("Warning: Failed to finalize WAV file: \(error)\n", stderr)
     }
     try? FileManager.default.removeItem(atPath: lockPath)
+
+    // Best-effort CoreAudio teardown. A stall here is recoverable
+    // because the WAV is already on disk; the recorder's SIGKILL just
+    // means a few leaked CoreAudio handles that the OS reclaims on
+    // process exit.
+    captureManager.teardownAudio()
     exit(0)
 }
 
